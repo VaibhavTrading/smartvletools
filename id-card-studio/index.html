@@ -105,7 +105,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css?v=20261114c">
+    <link rel="stylesheet" href="/style.css?v=20261114h">
     <!-- Google AdSense Auto Ads Script -->
     <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7314046797237895" crossorigin="anonymous"></script>
 </head>
@@ -116,7 +116,7 @@
     <header class="site-header">
         <div class="site-nav-container">
             <a href="/" class="site-brand" data-link title="SMART VLE TOOL Home">
-                <div class="site-logo-icon"><img src="/assets/aistudio/SVT_Logo_ac2e6fdb.png" alt="SMART VLE TOOL Logo" class="site-logo-img" /></div>
+                <div class="site-logo-icon"><img src="/assets/aistudio/SVT_Logo_ac2e6fdb.png?v=20261114e" alt="SMART VLE TOOL Logo" width="42" height="42" decoding="async" class="site-logo-img" /></div>
                 <div class="site-brand-text">
                     <h1>SMART VLE TOOL</h1>
                     <span>Free Online Image Editing & Document Tools</span>
@@ -640,6 +640,7 @@
                         <button class="btn btn-main" id="btn-print-doc" disabled onclick="printScannedDocument()">Print A4 Sheet</button>
                         <button class="btn btn-success" id="btn-save-img" disabled onclick="saveAsImage()">Download Image</button>
                         <button class="btn btn-success" id="btn-save-pdf" disabled onclick="saveAllToPDF()">Download PDF</button>
+                        <button class="btn btn-purple" id="btn-doc-send-to" disabled aria-haspopup="menu" aria-expanded="false" onclick="openSendToMenu('doc', this)">Send To ▾</button>
                     </div>
                 </div>
 
@@ -653,6 +654,7 @@
                     <div class="button-grid">
                         <button class="btn btn-purple" id="btn-print-single" onclick="printIDCards(true)">Print Single Card</button>
                         <button class="btn btn-success" id="btn-print-double" onclick="printIDCards(false)">Print Double Card</button>
+                        <button class="btn btn-main" id="btn-id-send-to" aria-haspopup="menu" aria-expanded="false" onclick="openSendToMenu('id', this)">Send To ▾</button>
                     </div>
                 </div>
             </aside>
@@ -802,7 +804,6 @@
                 <div class="editor-tool-pane" id="editorToolPane">
                     <div class="editor-pane-header">
                         <h2 id="editorToolTitle">Compress / Increase Image</h2>
-                        <p id="editorToolDesc">Reduce or enlarge image file size with exact KB targeting & quality control.</p>
                     </div>
 
                     <div class="editor-pane-body">
@@ -813,14 +814,6 @@
                                 <button class="sm-tab" onclick="setSizeMode('increase', this)">Increase (Enlarge KB)</button>
                             </div>
                             <div id="compressMode">
-                                <div class="control-group">
-                                    <div class="control-label"><span>Output Format</span></div>
-                                    <select id="compFmt" onchange="liveCompress()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light); font-weight:700;">
-                                        <option value="image/jpeg" selected>JPEG (Universal, High Efficiency)</option>
-                                        <option value="image/webp">WEBP (Modern Web Standard)</option>
-                                        <option value="image/png">PNG (Lossless Quality)</option>
-                                    </select>
-                                </div>
                                 <div class="control-group" id="qualSliderGroup">
                                     <div class="control-label"><span>Compression Quality</span><span id="qualVal">80%</span></div>
                                     <input type="range" id="qualSlider" min="5" max="100" value="80" oninput="document.getElementById('qualVal').textContent = this.value + '%'; liveCompress()">
@@ -867,14 +860,6 @@
                                 <div class="control-group">
                                     <div class="control-label"><span>Target Minimum File Size (KB)</span></div>
                                     <input type="number" id="targetIncKB" placeholder="e.g. 500, 1000, 2000" min="1" oninput="liveIncrease(550)" onchange="liveIncrease(0)" onkeydown="if(event.key==='Enter'){event.preventDefault();doIncrease();}" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
-                                </div>
-                                <div class="control-group">
-                                    <div class="control-label"><span>Output Format</span></div>
-                                    <select id="incFmt" onchange="liveIncrease()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
-                                        <option value="image/jpeg">JPEG</option>
-                                        <option value="image/png">PNG</option>
-                                        <option value="image/webp">WEBP</option>
-                                    </select>
                                 </div>
                                 <div class="control-group">
                                     <div class="control-label"><span>Quality Floor</span><span id="incQualVal">95%</span></div>
@@ -978,15 +963,8 @@
                                     <button class="btn btn-accent" style="min-height:28px; padding:4px 1px; font-size:10px;" onclick="setCropAnglePreset(90)">90°</button>
                                 </div>
 
-                                <div style="display:grid; grid-template-columns: 1fr 1fr 1.5fr; gap:6px; margin-bottom:10px;">
-                                    <button class="btn btn-accent" style="min-height:32px; font-size:11px;" onclick="adjustCropAngleStep(-1)" title="Rotate -1°">−1°</button>
-                                    <button class="btn btn-accent" style="min-height:32px; font-size:11px;" onclick="adjustCropAngleStep(1)" title="Rotate +1°">+1°</button>
-                                    <button class="btn btn-main" style="min-height:32px; font-size:11px;" onclick="applyCropRotation()" title="Apply custom angle rotation">Apply Angle</button>
-                                </div>
-
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                                    <button class="btn btn-accent" onclick="cropRotate(-90)" title="Rotate 90° Counter-Clockwise">↺ 90° CCW</button>
-                                    <button class="btn btn-accent" onclick="cropRotate(90)" title="Rotate 90° Clockwise">↻ 90° CW</button>
+                                <div style="margin-top:8px;">
+                                    <button class="btn btn-main" style="width:100%; min-height:34px; font-size:12px;" onclick="applyCropRotation()" title="Apply custom angle rotation">Apply Angle</button>
                                 </div>
                             </div>
                         </div>
@@ -1035,9 +1013,34 @@
                                 <div class="control-label"><span>Hue Rotation</span><span id="huev">0</span>°</div>
                                 <input type="range" id="hueSlider" min="0" max="360" value="0" oninput="document.getElementById('huev').textContent = this.value; liveBrightness()">
                             </div>
+                            <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border-light);">
+                                <div class="control-label" style="margin-bottom:8px;">
+                                    <span>RGB Color Balance (Pro)</span>
+                                </div>
+                                <div class="sm-tabs" id="rgbToneTabs" style="margin-bottom:10px;">
+                                    <button class="sm-tab" data-tone="shadows" onclick="setColorBalanceTone('shadows', this)">Shadows</button>
+                                    <button class="sm-tab active" data-tone="midtones" onclick="setColorBalanceTone('midtones', this)">Midtones</button>
+                                    <button class="sm-tab" data-tone="highlights" onclick="setColorBalanceTone('highlights', this)">Highlights</button>
+                                </div>
+                                <div class="control-group">
+                                    <div class="control-label"><span>Cyan ↔ Red (R)</span><span id="rgbRVal" style="color:#dc2626;">0</span></div>
+                                    <input type="range" id="rgbRSlider" min="-100" max="100" value="0" oninput="onRgbBalanceInput()" style="accent-color:#ef4444;">
+                                </div>
+                                <div class="control-group">
+                                    <div class="control-label"><span>Magenta ↔ Green (G)</span><span id="rgbGVal" style="color:#16a34a;">0</span></div>
+                                    <input type="range" id="rgbGSlider" min="-100" max="100" value="0" oninput="onRgbBalanceInput()" style="accent-color:#22c55e;">
+                                </div>
+                                <div class="control-group">
+                                    <div class="control-label"><span>Yellow ↔ Blue (B)</span><span id="rgbBVal" style="color:#2563eb;">0</span></div>
+                                    <input type="range" id="rgbBSlider" min="-100" max="100" value="0" oninput="onRgbBalanceInput()" style="accent-color:#3b82f6;">
+                                </div>
+                                <label style="display:flex; align-items:center; gap:8px; font-size:12px; font-weight:700; cursor:pointer; margin:6px 0 10px;">
+                                    <input type="checkbox" id="rgbPreserveLum" checked onchange="onRgbBalanceInput()"> Preserve Luminosity
+                                </label>
+                            </div>
                             <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
                                 <button class="btn btn-main" onclick="doBrightness()">Apply Adjustments</button>
-                                <button class="btn btn-accent" onclick="resetBrightness()">Reset to 100%</button>
+                                <button class="btn btn-accent" onclick="resetBrightness()">Reset All</button>
                             </div>
                         </div>
 
@@ -1083,7 +1086,7 @@
                             <div style="font-size:12px; font-weight:800; color:var(--text-dark); margin-bottom:8px;" id="i2pCountLabel">
                                 📄 0 images in sequence
                             </div>
-                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+                            <div style="display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:8px;">
                                 <div class="control-group">
                                     <div class="control-label"><span>Page Size</span></div>
                                     <select id="i2pPageSize" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
@@ -1103,7 +1106,7 @@
                                 </div>
                             </div>
 
-                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+                            <div style="display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:8px;">
                                 <div class="control-group">
                                     <div class="control-label"><span>Margin</span></div>
                                     <select id="i2pMargin" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
@@ -1122,7 +1125,7 @@
                                 </div>
                             </div>
 
-                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+                            <div style="display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:10px;">
                                 <div class="control-group">
                                     <div class="control-label"><span>Page Numbers</span></div>
                                     <select id="i2pPageNum" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
@@ -1150,7 +1153,7 @@
                             </div>
 
                             <input type="file" id="i2pFileInput" multiple accept="image/*" style="display:none" onchange="loadImg2Pdf(this)">
-                            <button class="btn btn-main" id="i2pRunBtn" disabled onclick="runImg2Pdf()" style="width:100%;">Compile & Download Multi-Page PDF</button>
+                            <button class="btn btn-main" id="i2pRunBtn" disabled onclick="runImg2Pdf()" style="width:100%;">Compile & Download</button>
 
                             <div id="i2pProgressWrap" class="editor-progress-wrap" style="margin-top:10px;">
                                 <div id="i2pProgressBar" class="editor-progress-bar"></div>
@@ -1166,7 +1169,7 @@
                             </div>
 
                             <div id="pdfCompressSettings">
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                                <div style="display:grid; grid-template-columns:1fr; gap:8px;">
                                     <div class="control-group">
                                         <div class="control-label"><span>DPI Preset</span></div>
                                         <select id="pdfQualPreset" onchange="updatePdfEstimate()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
@@ -1203,7 +1206,7 @@
                             </div>
 
                             <div id="pdfIncreaseSettings" style="display:none;">
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                                <div style="display:grid; grid-template-columns:1fr; gap:8px;">
                                     <div class="control-group">
                                         <div class="control-label"><span>Rendering DPI</span></div>
                                         <select id="pdfIncDpi" onchange="updatePdfEstimate()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
@@ -1247,9 +1250,9 @@
                     </div>
 
                     <!-- Bottom Sticky Action Strip -->
-                    <div class="editor-actions-strip" style="padding: 12px 18px; background: #fafbfe;">
+                    <div class="editor-actions-strip" style="padding: 10px 12px; background: #fafbfe;">
                         <button class="btn btn-success" id="btnEditorDownload" onclick="doEditorDownload()">Download Image</button>
-                        <button class="btn btn-purple" id="btnSyncToScanner" onclick="syncEditorToScanner(); MonuRouter.navigateTo('/document-studio')">Send to Document Studio</button>
+                        <button class="btn btn-purple" id="btnEditorSendTo" aria-haspopup="menu" aria-expanded="false" onclick="openSendToMenu('editor', this)">Send To ▾</button>
                     </div>
                 </div>
             </div>
@@ -1334,9 +1337,9 @@
 
 <!-- Core Engine Scripts -->
 <script src="/browser-image-compression.js"></script>
-<script src="/smart-optimizer.js?v=20261114d"></script>
-<script src="/script.js"></script>
-<script src="/editor.js?v=20261114d"></script>
+<script src="/smart-optimizer.js?v=20261114e"></script>
+<script src="/script.js?v=20261114h"></script>
+<script src="/editor.js?v=20261114h"></script>
 <script src="/site-router.js?v=20261114c"></script>
 <script src="/pwa-controller.js"></script>
 </body>

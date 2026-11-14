@@ -509,6 +509,56 @@ async function loadStudioFromDB() {
 
         dbLoaded = true;
 
+        // Hydrate incoming image sent from standalone Image & PDF Editor page
+        try {
+            if (sessionStorage.getItem('monu_pending_doc_transfer') === '1' && window.ImagePDFEditorDB) {
+                sessionStorage.removeItem('monu_pending_doc_transfer');
+                const incoming = await window.ImagePDFEditorDB.getEditorData('pending_doc_studio_transfer');
+                if (incoming && incoming.dataUrl) {
+                    await window.ImagePDFEditorDB.saveEditorData('pending_doc_studio_transfer', null);
+                    const importedImg = await new Promise((res, rej) => {
+                        const im = new Image();
+                        im.onload = () => res(im);
+                        im.onerror = rej;
+                        im.src = incoming.dataUrl;
+                    });
+                    if (activeIndex !== -1 && imageArray[activeIndex]) {
+                        const activeObj = imageArray[activeIndex];
+                        activeObj.element = importedImg;
+                        activeObj.rotation = 0;
+                        activeObj.corners = null;
+                        activeObj.cornersDisplayDim = null;
+                        activeObj.processedCanvas = null;
+                    } else {
+                        imageArray.push({
+                            id: Date.now() + Math.random(),
+                            name: incoming.name || 'edited_document.png',
+                            element: importedImg,
+                            rotation: 0,
+                            corners: null,
+                            cornersDisplayDim: null,
+                            processedCanvas: null,
+                            contrast: 1.0,
+                            brightness: 0,
+                            saturation: 1.0,
+                            sharpness: 0,
+                            shadowRemoval: false,
+                            filterMode: 'GRAYSCALE'
+                        });
+                        activeIndex = imageArray.length - 1;
+                    }
+                    corners = null;
+                    if (typeof docStudioState !== 'undefined') {
+                        docStudioState.activeIndex = activeIndex;
+                        docStudioState.corners = null;
+                    }
+                    saveStudioToDB('DOC');
+                }
+            }
+        } catch (transferErr) {
+            console.warn('Pending Doc Studio transfer restore warning:', transferErr);
+        }
+
         if (currentMode === 'DOC') {
             rebuildGalleryStrip();
             updateButtonStates();
@@ -1265,7 +1315,7 @@ function deleteImage(idx) {
 
 function updateButtonStates() {
     let disabled = imageArray.length === 0;
-    ['btn-optimize-all', 'btn-effect-threshold', 'btn-effect-grayscale', 'btn-effect-color', 'btn-effect-enhance', 'btn-shadow-removal', 'btn-save-pdf', 'btn-save-bucket', 'btn-print-doc'].forEach(id => {
+    ['btn-optimize-all', 'btn-effect-threshold', 'btn-effect-grayscale', 'btn-effect-color', 'btn-effect-enhance', 'btn-shadow-removal', 'btn-save-img', 'btn-save-pdf', 'btn-save-bucket', 'btn-print-doc', 'btn-doc-send-to'].forEach(id => {
         let el = document.getElementById(id);
         if (el) el.disabled = disabled;
     });
@@ -1803,8 +1853,12 @@ function processImageTransform() {
             drawIDPreviewComposite();
         }
 
-        document.getElementById('btn-save-img').disabled = false; 
-        document.getElementById('btn-print-doc').disabled = false;
+        const btnSaveImg = document.getElementById('btn-save-img');
+        if (btnSaveImg) btnSaveImg.disabled = false;
+        const btnPrintDoc = document.getElementById('btn-print-doc');
+        if (btnPrintDoc) btnPrintDoc.disabled = false;
+        const btnDocSendTo = document.getElementById('btn-doc-send-to');
+        if (btnDocSendTo) btnDocSendTo.disabled = false;
 
     } finally {
         baseSrc.delete(); 
@@ -2803,4 +2857,182 @@ window.MonuStorageManager = {
         }
     }
 };
+
+// ═══ CROSS-STUDIO "SEND TO" TRANSFER HELPERS ═══
+function getDocStudioTransferItems(singleOnly = false) {
+    if (!imageArray || imageArray.length === 0) return [];
+
+    if (singleOnly) {
+        const idx = (activeIndex >= 0 && activeIndex < imageArray.length) ? activeIndex : 0;
+        const imgObj = imageArray[idx];
+        let canvas = getOrGenerateCroppedCanvas();
+        if (!canvas && imgObj) {
+            canvas = imgObj.processedCanvas || renderRotatedOriginalToCanvas(imgObj);
+        }
+        if (!canvas) return [];
+        const baseName = (imgObj && imgObj.name ? imgObj.name.replace(/\.[^/.]+$/, '') : `Doc_Scan_${idx + 1}`);
+        return [{
+            dataUrl: canvas.toDataURL('image/png'),
+            name: `${baseName}_scan.png`
+        }];
+    }
+
+    const items = [];
+    for (let i = 0; i < imageArray.length; i++) {
+        const imgObj = imageArray[i];
+        let canvas = null;
+        let isTemp = false;
+        if (i === activeIndex) {
+            canvas = getOrGenerateCroppedCanvas();
+        }
+        if (!canvas && imgObj.processedCanvas) {
+            canvas = imgObj.processedCanvas;
+        }
+        if (!canvas && imgObj.element) {
+            canvas = renderRotatedOriginalToCanvas(imgObj);
+            isTemp = true;
+        }
+        if (canvas) {
+            const baseName = (imgObj.name ? imgObj.name.replace(/\.[^/.]+$/, '') : `Doc_Scan_Page_${i + 1}`);
+            items.push({
+                dataUrl: canvas.toDataURL('image/png'),
+                name: `${baseName}_p${i + 1}.png`
+            });
+            if (isTemp) {
+                canvas.width = 1;
+                canvas.height = 1;
+            }
+        }
+    }
+    return items;
+}
+
+function getIdCardStudioTransferItems() {
+    const orientEl = document.getElementById('control-id-orientation');
+    const orient = orientEl ? orientEl.value : 'H';
+    const marksEl = document.getElementById('check-crop-marks');
+    const includeBorder = marksEl ? marksEl.checked : true;
+
+    const cardW = orient === 'V' ? 638 : 1011;
+    const cardH = orient === 'V' ? 1011 : 638;
+    const margin = 44;
+    const gap = 44;
+
+    if (idLeftCanvas && idRightCanvas) {
+        const comp = document.createElement('canvas');
+        comp.width = margin * 2 + cardW * 2 + gap;
+        comp.height = margin * 2 + cardH;
+        const ctx = comp.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, comp.width, comp.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        const x1 = margin;
+        const x2 = margin + cardW + gap;
+        const y = margin;
+        ctx.drawImage(idLeftCanvas, x1, y, cardW, cardH);
+        ctx.drawImage(idRightCanvas, x2, y, cardW, cardH);
+
+        if (includeBorder) {
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x1, y, cardW, cardH);
+            ctx.strokeRect(x2, y, cardW, cardH);
+        }
+        const dataUrl = comp.toDataURL('image/png');
+        comp.width = 1;
+        comp.height = 1;
+        return [{ dataUrl, name: 'ID_Card_Front_Back.png' }];
+    }
+
+    if (idLeftCanvas || idRightCanvas) {
+        const singleCanvas = idLeftCanvas || idRightCanvas;
+        const comp = document.createElement('canvas');
+        comp.width = margin * 2 + cardW;
+        comp.height = margin * 2 + cardH;
+        const ctx = comp.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, comp.width, comp.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(singleCanvas, margin, margin, cardW, cardH);
+        if (includeBorder) {
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(margin, margin, cardW, cardH);
+        }
+        const dataUrl = comp.toDataURL('image/png');
+        comp.width = 1;
+        comp.height = 1;
+        return [{ dataUrl, name: idLeftCanvas ? 'ID_Card_Front.png' : 'ID_Card_Back.png' }];
+    }
+
+    const activeCanvas = getOrGenerateCroppedCanvas();
+    if (activeCanvas) {
+        return [{
+            dataUrl: activeCanvas.toDataURL('image/png'),
+            name: 'ID_Card_Scanned.png'
+        }];
+    }
+    return [];
+}
+
+async function sendStudioTo(studioType, destination) {
+    if (typeof window.closeSendToMenu === 'function') {
+        window.closeSendToMenu();
+    }
+
+    const singleOnly = (destination === 'editor');
+    const items = studioType === 'id'
+        ? getIdCardStudioTransferItems()
+        : getDocStudioTransferItems(singleOnly);
+
+    if (!items || items.length === 0) {
+        alert(studioType === 'id'
+            ? 'Please upload an ID card image or assign a Front/Back card slot first!'
+            : 'Please upload or scan at least one document image first!');
+        return;
+    }
+
+    const targetTool = destination === 'img2pdf'
+        ? 'img2pdf'
+        : (destination === 'pdfcompress' ? 'pdfcompress' : 'compress');
+    const sourceLabel = studioType === 'id' ? 'ID Card Studio' : 'Document Studio';
+    const payload = {
+        source: sourceLabel,
+        targetTool,
+        items,
+        timestamp: Date.now()
+    };
+
+    const hasSpaEditor = !!document.getElementById('page-editor-studio');
+    if (hasSpaEditor && typeof window.receiveCrossStudioTransfer === 'function') {
+        if (typeof MonuRouter !== 'undefined' && MonuRouter.navigateTo) {
+            MonuRouter.navigateTo('/image-pdf-editor');
+        } else if (typeof switchMode === 'function') {
+            switchMode('EDITOR');
+        }
+        await window.receiveCrossStudioTransfer(payload);
+        return;
+    }
+
+    // Multi-page route transition: persist transfer safely in IndexedDB before reload
+    try {
+        if (window.ImagePDFEditorDB) {
+            await window.ImagePDFEditorDB.saveEditorData('pending_cross_studio_transfer', payload);
+            sessionStorage.setItem('monu_pending_transfer', '1');
+        }
+    } catch (err) {
+        console.warn('Cross-studio transfer DB persist warning:', err);
+    }
+
+    if (typeof MonuRouter !== 'undefined' && MonuRouter.navigateTo) {
+        MonuRouter.navigateTo('/image-pdf-editor');
+    } else {
+        window.location.href = '/image-pdf-editor';
+    }
+}
+window.sendStudioTo = sendStudioTo;
+
 

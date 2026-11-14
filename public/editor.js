@@ -173,12 +173,15 @@ function openCurrentInEditor() {
     }
 }
 
-function loadEditorFromDataUrl(dataUrl, name) {
+function loadEditorFromDataUrl(dataUrl, name, sourceLabel = 'Document Studio') {
     FNAME = (name || 'image').replace(/\.[^/.]+$/, '');
     IMG_FILE = null;
+    resetCompressBaseImage();
     const img = new Image();
     img.onload = () => {
         IMG = img;
+        resetCompressStatsCard();
+        RESULT = null;
         HISTORY = [];
         HIST_IDX = -1;
         const origImgEl = document.getElementById('origImg');
@@ -199,7 +202,7 @@ function loadEditorFromDataUrl(dataUrl, name) {
             livePreviewImg.style.transform = '';
         }
         if (resInfo) {
-            const kb = ((dataUrl.split(',')[1].length * 3 / 4) / 1024).toFixed(1);
+            const kb = ((dataUrl.split(',')[1]?.length || 0) * 3 / 4 / 1024).toFixed(1);
             resInfo.textContent = `${img.width}×${img.height}px | ~${kb}KB`;
         }
         if (rW) rW.placeholder = img.width;
@@ -212,94 +215,421 @@ function loadEditorFromDataUrl(dataUrl, name) {
 
         updateImageInfoBar(img, dataUrl, FNAME, null);
         updateEditorFilenameUI(true);
-        pushHistory(dataUrl, 'Imported from Document Studio');
-        showEditorStatus('✅ Image imported from Document Studio! Choose any tool below.', 'ok');
-        
-        // Select crop or current tool
-        switchTool(TOOL || 'compress', null);
+        pushHistory(dataUrl, `Imported from ${sourceLabel}`);
+        showEditorStatus(`✅ Image imported from ${sourceLabel}! Choose any tool below.`, 'ok');
+
+        // Select current tool (fallback to compress if standalone batch tool was active)
+        const activeSingleTool = (TOOL && TOOL !== 'img2pdf' && TOOL !== 'pdfcompress') ? TOOL : 'compress';
+        switchTool(activeSingleTool, null);
     };
     img.src = dataUrl;
 }
 
-function syncEditorToScanner() {
-    let currentUrl = RESULT || (IMG ? IMG.src : null);
-    if (!currentUrl) {
+function dataUrlToBlobSync(dataUrl) {
+    const parts = (dataUrl || '').split(',');
+    const mimeMatch = parts[0] ? parts[0].match(/:(.*?);/) : null;
+    const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+    const bstr = atob(parts[1] || '');
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+}
+
+function blobToDataUrlAsync(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function crossItemToFile(item, index = 0) {
+    const fallbackBase = `studio_image_${index + 1}`;
+    let blob = item.blob || null;
+    let dataUrl = item.dataUrl || null;
+
+    if (!blob && dataUrl) {
+        if (dataUrl.startsWith('data:')) {
+            blob = dataUrlToBlobSync(dataUrl);
+        } else {
+            const resp = await fetch(dataUrl);
+            blob = await resp.blob();
+        }
+    }
+    if (!dataUrl && blob) {
+        dataUrl = await blobToDataUrlAsync(blob);
+    }
+
+    const mime = (blob && blob.type) || 'image/png';
+    let ext = mime.split('/')[1] || 'png';
+    if (ext === 'jpeg') ext = 'jpg';
+    const rawName = (item.name || fallbackBase).replace(/\.[^/.]+$/, '');
+    const file = new File([blob], `${rawName}.${ext}`, { type: mime });
+    return { file, dataUrl, blob, name: `${rawName}.${ext}` };
+}
+
+async function getEditorActiveTransferPayload() {
+    if (!RESULT && !IMG && !COMPRESSED_RESULT) return null;
+
+    // 1. Preserve exact compressed/increased KB result if currently in Compress tool
+    if (TOOL === 'compress' && COMPRESSED_RESULT && COMPRESSED_RESULT.blob) {
+        const blob = COMPRESSED_RESULT.blob;
+        const mime = blob.type || 'image/jpeg';
+        const ext = mime.includes('png') ? 'png' : (mime.includes('webp') ? 'webp' : 'jpg');
+        const name = `${FNAME || 'image'}_compressed.${ext}`;
+        const dataUrl = await blobToDataUrlAsync(blob);
+        const file = new File([blob], name, { type: mime });
+        return { file, dataUrl, blob, name };
+    }
+
+    // 2. Bake pending Adjust Color / RGB Color Balance sliders if active in Brightness tool
+    if (TOOL === 'brightness' && IMG) {
+        const br = document.getElementById('brSlider')?.value ?? '100';
+        const ct = document.getElementById('ctSlider')?.value ?? '100';
+        const sat = document.getElementById('satSlider')?.value ?? '100';
+        const hue = document.getElementById('hueSlider')?.value ?? '0';
+        const hasRgb = typeof hasActiveRgbBalance === 'function' && hasActiveRgbBalance();
+        if (hasRgb || br !== '100' || ct !== '100' || sat !== '100' || hue !== '0') {
+            const natW = IMG.naturalWidth || IMG.width;
+            const natH = IMG.naturalHeight || IMG.height;
+            const c = getCanvas(natW, natH);
+            const ctx = c.getContext('2d', { willReadFrequently: true });
+            ctx.filter = `brightness(${br}%) contrast(${ct}%) saturate(${sat}%) hue-rotate(${hue}deg)`;
+            ctx.drawImage(IMG, 0, 0, natW, natH);
+            ctx.filter = 'none';
+            if (hasRgb && typeof applyColorBalanceToImageData === 'function') {
+                const imgData = ctx.getImageData(0, 0, natW, natH);
+                applyColorBalanceToImageData(imgData, rgbBalance);
+                ctx.putImageData(imgData, 0, 0);
+            }
+            const outUrl = c.toDataURL('image/jpeg', 0.97);
+            c.width = 1;
+            c.height = 1;
+            return await crossItemToFile({ dataUrl: outUrl, name: `${FNAME || 'image'}_color.jpg` }, 0);
+        }
+    }
+
+    // 3. Default: active RESULT or loaded IMG
+    const currentUrl = RESULT || (IMG ? IMG.src : null);
+    if (!currentUrl) return null;
+    return await crossItemToFile({
+        dataUrl: currentUrl,
+        name: `${FNAME || 'image'}_${TOOL || 'edited'}`
+    }, 0);
+}
+
+async function syncEditorToScanner() {
+    const payload = await getEditorActiveTransferPayload();
+    if (!payload || !payload.dataUrl) {
         showEditorStatus('⚠️ No edited image available to send to Document Studio.', 'err');
+        return;
+    }
+    const currentUrl = payload.dataUrl;
+
+    const hasSpaDocStudio = !!document.getElementById('page-doc-studio') && typeof imageArray !== 'undefined';
+    if (!hasSpaDocStudio) {
+        try {
+            if (window.ImagePDFEditorDB) {
+                await window.ImagePDFEditorDB.saveEditorData('pending_doc_studio_transfer', {
+                    dataUrl: currentUrl,
+                    name: payload.name || `${FNAME || 'edited'}_processed.png`
+                });
+                sessionStorage.setItem('monu_pending_doc_transfer', '1');
+            }
+        } catch (err) {
+            console.warn('Pending Doc Studio DB persist warning:', err);
+        }
+        if (typeof MonuRouter !== 'undefined' && MonuRouter.navigateTo) {
+            MonuRouter.navigateTo('/document-studio');
+        } else {
+            window.location.href = '/document-studio';
+        }
         return;
     }
 
     const img = new Image();
     img.onload = () => {
-        if (typeof imageArray !== 'undefined') {
-            let targetIndex = -1;
-            if (typeof activeIndex !== 'undefined' && activeIndex !== -1 && imageArray[activeIndex]) {
-                // Update active page
-                let activeObj = imageArray[activeIndex];
-                activeObj.element = img;
-                activeObj.rotation = 0; // rotation is already baked in
-                activeObj.corners = null;
-                activeObj.cornersDisplayDim = null;
-                activeObj.processedCanvas = null;
-                targetIndex = activeIndex;
-            } else {
-                // Append as new page
-                imageArray.push({
-                    id: Date.now() + Math.random(),
-                    name: `${FNAME || 'edited'}_processed.png`,
-                    element: img,
-                    rotation: 0,
-                    corners: null,
-                    cornersDisplayDim: null,
-                    processedCanvas: null,
-                    contrast: 1.0,
-                    brightness: 0,
-                    saturation: 1.0,
-                    sharpness: 0,
-                    shadowRemoval: false,
-                    filterMode: 'GRAYSCALE'
-                });
-                targetIndex = imageArray.length - 1;
-                activeIndex = targetIndex;
-            }
+        let targetIndex = -1;
+        if (typeof activeIndex !== 'undefined' && activeIndex !== -1 && imageArray[activeIndex]) {
+            let activeObj = imageArray[activeIndex];
+            activeObj.element = img;
+            activeObj.rotation = 0;
+            activeObj.corners = null;
+            activeObj.cornersDisplayDim = null;
+            activeObj.processedCanvas = null;
+            targetIndex = activeIndex;
+        } else {
+            imageArray.push({
+                id: Date.now() + Math.random(),
+                name: payload.name || `${FNAME || 'edited'}_processed.png`,
+                element: img,
+                rotation: 0,
+                corners: null,
+                cornersDisplayDim: null,
+                processedCanvas: null,
+                contrast: 1.0,
+                brightness: 0,
+                saturation: 1.0,
+                sharpness: 0,
+                shadowRemoval: false,
+                filterMode: 'GRAYSCALE'
+            });
+            targetIndex = imageArray.length - 1;
+            activeIndex = targetIndex;
+        }
 
-            if (typeof docStudioState !== 'undefined') {
-                docStudioState.activeIndex = targetIndex;
-                docStudioState.corners = null;
-            }
-            if (typeof corners !== 'undefined') {
-                corners = null;
-            }
+        if (typeof docStudioState !== 'undefined') {
+            docStudioState.activeIndex = targetIndex;
+            docStudioState.corners = null;
+        }
+        if (typeof corners !== 'undefined') {
+            corners = null;
+        }
 
-            if (typeof switchMode === 'function') switchMode('DOC');
-            if (typeof rebuildGalleryStrip === 'function') rebuildGalleryStrip();
-            if (typeof updateButtonStates === 'function') updateButtonStates();
-            if (typeof setActiveImage === 'function') setActiveImage(targetIndex);
+        if (typeof MonuRouter !== 'undefined' && MonuRouter.navigateTo) {
+            MonuRouter.navigateTo('/document-studio');
+        } else if (typeof switchMode === 'function') {
+            switchMode('DOC');
+        }
+        if (typeof rebuildGalleryStrip === 'function') rebuildGalleryStrip();
+        if (typeof updateButtonStates === 'function') updateButtonStates();
+        if (typeof setActiveImage === 'function') setActiveImage(targetIndex);
 
-            // Double enforce standard edge corners on newly imported document after canvas render
-            setTimeout(() => {
-                let canvasSrc = document.getElementById('canvas-src');
-                if (canvasSrc) {
-                    let displayW = parseFloat(canvasSrc.style.width) || canvasSrc.width;
-                    let displayH = parseFloat(canvasSrc.style.height) || canvasSrc.height;
-                    if (displayW > 10 && displayH > 10) {
-                        if (typeof initPointersStandard === 'function') {
-                            initPointersStandard(displayW, displayH);
-                        }
-                        if (typeof updatePointerDOM === 'function') {
-                            updatePointerDOM();
-                        }
-                        if (typeof scheduleLiveTransform === 'function') {
-                            scheduleLiveTransform(30);
-                        }
+        setTimeout(() => {
+            let canvasSrc = document.getElementById('canvas-src');
+            if (canvasSrc) {
+                let displayW = parseFloat(canvasSrc.style.width) || canvasSrc.width;
+                let displayH = parseFloat(canvasSrc.style.height) || canvasSrc.height;
+                if (displayW > 10 && displayH > 10) {
+                    if (typeof initPointersStandard === 'function') {
+                        initPointersStandard(displayW, displayH);
+                    }
+                    if (typeof updatePointerDOM === 'function') {
+                        updatePointerDOM();
+                    }
+                    if (typeof scheduleLiveTransform === 'function') {
+                        scheduleLiveTransform(30);
                     }
                 }
-            }, 80);
+            }
+        }, 80);
 
-            showEditorStatus('✅ Image sent to Document Studio!', 'ok');
-        }
+        showEditorStatus('✅ Image sent to Document Studio!', 'ok');
     };
     img.src = currentUrl;
 }
+
+async function sendEditorImageTo(destination) {
+    if (typeof closeSendToMenu === 'function') closeSendToMenu();
+
+    if (destination === 'doc') {
+        await syncEditorToScanner();
+        return;
+    }
+
+    const payload = await getEditorActiveTransferPayload();
+    if (!payload || !payload.file) {
+        showEditorStatus('⚠️ Upload or load an image first to send it!', 'err');
+        return;
+    }
+
+    if (destination === 'img2pdf') {
+        switchTool('img2pdf', null);
+        await addFilesToImg2Pdf([payload.file]);
+        showEditorStatus('✅ Image added directly to Images to PDF!', 'ok');
+    } else if (destination === 'pdfcompress') {
+        switchTool('pdfcompress', null);
+        await addFilesToPdfOptimizer([payload.file]);
+        showEditorStatus('✅ Image added directly to PDF Optimizer!', 'ok');
+    }
+}
+window.sendEditorImageTo = sendEditorImageTo;
+
+async function receiveCrossStudioTransfer(payload) {
+    if (!payload || !Array.isArray(payload.items) || payload.items.length === 0) return;
+    const target = payload.targetTool || 'compress';
+    const sourceLabel = payload.source || 'Studio';
+
+    if (target === 'img2pdf') {
+        const files = [];
+        for (let i = 0; i < payload.items.length; i++) {
+            const converted = await crossItemToFile(payload.items[i], i);
+            if (converted && converted.file) files.push(converted.file);
+        }
+        switchTool('img2pdf', null);
+        if (files.length) {
+            await addFilesToImg2Pdf(files);
+            showEditorStatus(`✅ Imported ${files.length} image${files.length !== 1 ? 's' : ''} from ${sourceLabel} into Images to PDF!`, 'ok');
+        }
+        return;
+    }
+
+    if (target === 'pdfcompress') {
+        const files = [];
+        for (let i = 0; i < payload.items.length; i++) {
+            const converted = await crossItemToFile(payload.items[i], i);
+            if (converted && converted.file) files.push(converted.file);
+        }
+        switchTool('pdfcompress', null);
+        if (files.length) {
+            await addFilesToPdfOptimizer(files);
+            showEditorStatus(`✅ Imported ${files.length} page${files.length !== 1 ? 's' : ''} from ${sourceLabel} into PDF Optimizer!`, 'ok');
+        }
+        return;
+    }
+
+    // Default: open in main Image & PDF Editor
+    const firstItem = payload.items[0];
+    if (firstItem && firstItem.dataUrl) {
+        TOOL = 'compress';
+        loadEditorFromDataUrl(firstItem.dataUrl, firstItem.name || 'studio_image', sourceLabel);
+    }
+}
+window.receiveCrossStudioTransfer = receiveCrossStudioTransfer;
+
+async function checkPendingCrossStudioTransfer() {
+    try {
+        if (sessionStorage.getItem('monu_pending_transfer') !== '1') return;
+        sessionStorage.removeItem('monu_pending_transfer');
+        if (!window.ImagePDFEditorDB) return;
+        await window.ImagePDFEditorDB.init();
+        const payload = await window.ImagePDFEditorDB.getEditorData('pending_cross_studio_transfer');
+        if (payload) {
+            await window.ImagePDFEditorDB.saveEditorData('pending_cross_studio_transfer', null);
+            await receiveCrossStudioTransfer(payload);
+        }
+    } catch (err) {
+        console.warn('Pending cross-studio transfer check warning:', err);
+    }
+}
+
+// ═══ GLOBAL CROSS-STUDIO "SEND TO" FLOATING POPOVER MENU ═══
+let _activeSendToTrigger = null;
+let _sendToOutsideHandler = null;
+let _sendToKeyHandler = null;
+
+function closeSendToMenu() {
+    const existing = document.getElementById('monuSendToPopover');
+    if (existing) existing.remove();
+    if (_sendToOutsideHandler) {
+        document.removeEventListener('mousedown', _sendToOutsideHandler, true);
+        document.removeEventListener('touchstart', _sendToOutsideHandler, true);
+        _sendToOutsideHandler = null;
+    }
+    if (_sendToKeyHandler) {
+        document.removeEventListener('keydown', _sendToKeyHandler, true);
+        _sendToKeyHandler = null;
+    }
+    if (_activeSendToTrigger) {
+        _activeSendToTrigger.setAttribute('aria-expanded', 'false');
+        _activeSendToTrigger = null;
+    }
+}
+window.closeSendToMenu = closeSendToMenu;
+
+function openSendToMenu(sourceContext, triggerBtn) {
+    if (!triggerBtn) return;
+    if (_activeSendToTrigger === triggerBtn && document.getElementById('monuSendToPopover')) {
+        closeSendToMenu();
+        return;
+    }
+    closeSendToMenu();
+
+    let options = [];
+    if (sourceContext === 'doc') {
+        options = [
+            { icon: '🎨', title: 'Image & PDF Editor', sub: 'Compress KB size, resize, crop & adjust colors', action: () => window.sendStudioTo('doc', 'editor') },
+            { icon: '🖼️', title: 'Images to PDF Tool', sub: 'Send all scanned pages into PDF compiler', action: () => window.sendStudioTo('doc', 'img2pdf') },
+            { icon: '🗜️', title: 'PDF Optimizer Tool', sub: 'Compress & optimize scanned pages into target KB PDF', action: () => window.sendStudioTo('doc', 'pdfcompress') }
+        ];
+    } else if (sourceContext === 'id') {
+        options = [
+            { icon: '🎨', title: 'Image & PDF Editor', sub: 'Compress KB size, resize & adjust ID card colors', action: () => window.sendStudioTo('id', 'editor') },
+            { icon: '🖼️', title: 'Images to PDF Tool', sub: 'Convert ID card directly into PDF', action: () => window.sendStudioTo('id', 'img2pdf') },
+            { icon: '🗜️', title: 'PDF Optimizer Tool', sub: 'Optimize ID card as target-KB PDF', action: () => window.sendStudioTo('id', 'pdfcompress') }
+        ];
+    } else {
+        options = [
+            { icon: '🖼️', title: 'Images to PDF Tool', sub: 'Add current image directly into PDF compiler', action: () => window.sendEditorImageTo('img2pdf') },
+            { icon: '🗜️', title: 'PDF Optimizer Tool', sub: 'Optimize current image directly to PDF', action: () => window.sendEditorImageTo('pdfcompress') },
+            { icon: '📄', title: 'Document Studio', sub: 'Send image to scanner & edge cropper', action: () => window.sendEditorImageTo('doc') }
+        ];
+    }
+
+    const pop = document.createElement('div');
+    pop.id = 'monuSendToPopover';
+    pop.className = 'send-to-popover';
+    pop.setAttribute('role', 'menu');
+
+    const header = document.createElement('div');
+    header.className = 'send-to-popover-header';
+    header.innerHTML = '<span>Send Image To</span>';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'send-to-close-btn';
+    closeBtn.setAttribute('aria-label', 'Close menu');
+    closeBtn.textContent = '✕';
+    closeBtn.onclick = closeSendToMenu;
+    header.appendChild(closeBtn);
+    pop.appendChild(header);
+
+    options.forEach(opt => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'send-to-option';
+        btn.setAttribute('role', 'menuitem');
+        btn.innerHTML = `
+            <span class="send-to-option-icon">${opt.icon}</span>
+            <span class="send-to-option-text">
+                <span class="send-to-option-title">${opt.title}</span>
+                <span class="send-to-option-sub">${opt.sub}</span>
+            </span>
+            <span class="send-to-option-arrow">→</span>`;
+        btn.onclick = (ev) => {
+            ev.stopPropagation();
+            opt.action();
+        };
+        pop.appendChild(btn);
+    });
+
+    document.body.appendChild(pop);
+    _activeSendToTrigger = triggerBtn;
+    triggerBtn.setAttribute('aria-expanded', 'true');
+
+    // Viewport-safe fixed placement (never clipped by sidebar overflow)
+    const tr = triggerBtn.getBoundingClientRect();
+    const pr = pop.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - tr.bottom;
+    const spaceAbove = tr.top;
+    let top = (spaceBelow >= pr.height + 12 || spaceBelow >= spaceAbove)
+        ? Math.min(window.innerHeight - pr.height - 12, tr.bottom + 8)
+        : Math.max(12, tr.top - pr.height - 8);
+    let left = tr.left + (tr.width / 2) - (pr.width / 2);
+    left = Math.max(12, Math.min(left, window.innerWidth - pr.width - 12));
+
+    pop.style.top = `${Math.round(top)}px`;
+    pop.style.left = `${Math.round(left)}px`;
+
+    _sendToOutsideHandler = (ev) => {
+        if (!pop.contains(ev.target) && ev.target !== triggerBtn && !triggerBtn.contains(ev.target)) {
+            closeSendToMenu();
+        }
+    };
+    _sendToKeyHandler = (ev) => {
+        if (ev.key === 'Escape') closeSendToMenu();
+    };
+    setTimeout(() => {
+        document.addEventListener('mousedown', _sendToOutsideHandler, true);
+        document.addEventListener('touchstart', _sendToOutsideHandler, true);
+        document.addEventListener('keydown', _sendToKeyHandler, true);
+    }, 0);
+}
+window.openSendToMenu = openSendToMenu;
+
 
 // ═══ UNDO / REDO ═══
 function pushHistory(url, label) {
@@ -329,6 +659,7 @@ function applyHistory(idx) {
     const img = new Image();
     img.onload = () => {
         IMG = img;
+        resetCompressStatsCard();
         const livePreviewImg = document.getElementById('livePreviewImg');
         const origImg = document.getElementById('origImg');
         const resInfo = document.getElementById('resInfo');
@@ -375,6 +706,7 @@ function resetEditorImage() {
     const img = new Image();
     img.onload = () => {
         IMG = img;
+        resetCompressStatsCard();
         const livePreviewImg = document.getElementById('livePreviewImg');
         const origImg = document.getElementById('origImg');
         const resInfo = document.getElementById('resInfo');
@@ -413,6 +745,7 @@ function deleteEditorImage() {
     IMG = null;
     IMG_FILE = null;
     RESULT = null;
+    resetCompressStatsCard();
     FNAME = 'image';
     HISTORY = [];
     HIST_IDX = -1;
@@ -475,9 +808,9 @@ window.addEventListener('keydown', e => {
 const EDITOR_TOOLS_META = {
     compress: { title: 'Compress / Increase Image', desc: 'Reduce or enlarge image file size with exact KB targeting & quality control.' },
     resize: { title: 'Resize Image Dimensions', desc: 'Set custom width and height in pixels while maintaining high visual quality.' },
-    crop: { title: 'Crop, Flip & Rotate Canvas', desc: 'Crop with precise units and presets, flip horizontal/vertical, or rotate 90° CCW/CW.' },
+    crop: { title: 'Crop, Flip & Rotate Canvas', desc: 'Crop with precise units and presets, flip horizontal/vertical, or rotate by custom angle.' },
     convert: { title: 'Format Converter', desc: 'Convert seamlessly between JPG, PNG, WEBP, BMP, TIFF, and AVIF formats.' },
-    brightness: { title: 'Brightness, Contrast & Saturation', desc: 'Tune exposure, contrast, saturation, and hue shift with instant live preview.' },
+    brightness: { title: 'Adjust Color & RGB Balance', desc: 'Tune Brightness, Contrast, Saturation, Hue & Pro RGB Color Balance (Shadows/Midtones/Highlights).' },
     watermark: { title: 'Custom Text Watermark', desc: 'Stamp text copyright, brand marks, or notices at 9 anchor points with opacity control.' },
     img2pdf: { title: 'Batch Images to PDF Compiler', desc: 'Compile multiple images into one multi-page PDF with reordering, sizing, and target limits.' },
     pdfcompress: { title: 'PDF Compress & Optimizer', desc: 'Unified multi-file/multi-page PDF optimization with multi-pass DPI rendering.' }
@@ -497,9 +830,7 @@ function switchTool(id, btn) {
 
     const t = EDITOR_TOOLS_META[id] || {};
     const titleEl = document.getElementById('editorToolTitle');
-    const descEl = document.getElementById('editorToolDesc');
     if (titleEl) titleEl.textContent = t.title || id;
-    if (descEl) descEl.textContent = t.desc || '';
 
     // Hide all tool containers in right pane
     document.querySelectorAll('[id^="c-"]').forEach(el => el.style.display = 'none');
@@ -536,7 +867,7 @@ function switchTool(id, btn) {
         deleteImgBtn.style.display = (IMG && !isStandalone) ? '' : 'none';
     }
     if (bottomActionStrip) {
-        bottomActionStrip.style.display = isStandalone ? 'none' : 'flex';
+        bottomActionStrip.style.display = isStandalone ? 'none' : '';
     }
 
     if (id === 'img2pdf') {
@@ -583,9 +914,15 @@ function switchTool(id, btn) {
     if (IMG && !isStandalone) {
         updateImageInfoBar(IMG, RESULT || IMG.src, FNAME, IMG_FILE);
         updateEditorFilenameUI(false);
-        if (id === 'compress') {
-            if (sizeMode === 'increase') liveIncrease();
-            else liveCompress();
+        if (id === 'compress' && !COMPRESSED_RESULT) {
+            resetCompressStatsCard();
+            if (livePreviewImg) livePreviewImg.src = RESULT || IMG.src;
+            const resInfo = document.getElementById('resInfo');
+            if (resInfo) {
+                resInfo.textContent = sizeMode === 'increase'
+                    ? 'Adjust controls or click Execute File Size Boost'
+                    : 'Adjust controls or click Compress Image';
+            }
         }
         if (id === 'crop') initCropDisplay();
         if (id === 'brightness') resetBrightness();
@@ -608,6 +945,7 @@ function loadEditorImg(input) {
         img.onload = () => {
             resetCompressBaseImage();
             IMG = img;
+            resetCompressStatsCard();
             HISTORY = [];
             HIST_IDX = -1;
             const src = e.target.result;
@@ -729,8 +1067,6 @@ function setEditorResult(url, label, skipReTrigger = false) {
         if (!skipReTrigger) {
             if (TOOL === 'crop') {
                 initCropDisplay();
-            } else if (TOOL === 'compress') {
-                liveCompress();
             } else if (TOOL === 'resize') {
                 liveResize();
             }
@@ -913,16 +1249,88 @@ function resetCompressBaseImage() {
     COMPRESSED_RESULT = null;
 }
 
+function resetCompressStatsCard() {
+    const card = document.getElementById('compressStatsCard');
+    if (!card) return;
+    card.style.display = 'block';
+
+    const badgeEl = document.getElementById('compResBadge');
+    const origStats = document.getElementById('compOrigStats');
+    const newStats = document.getElementById('compNewStats');
+    const dimStats = document.getElementById('compDimStats');
+    const savingsStats = document.getElementById('compSavingsStats');
+    const targetLabel = document.getElementById('compTargetLabel');
+    const targetStatus = document.getElementById('compTargetStatus');
+
+    if (badgeEl) badgeEl.textContent = 'Standard Service';
+
+    if (IMG) {
+        const w = IMG.naturalWidth || IMG.width || 0;
+        const h = IMG.naturalHeight || IMG.height || 0;
+        let origBytes = 0;
+        if (IMG_FILE && IMG_FILE.size) {
+            origBytes = IMG_FILE.size;
+        } else if (IMG.src && IMG.src.startsWith('data:')) {
+            origBytes = Math.round((IMG.src.split(',')[1] || '').length * 3 / 4);
+        } else if (w && h) {
+            origBytes = Math.round(w * h * 3 * 0.4);
+        }
+        const origKB = origBytes / 1024;
+        if (origStats) origStats.textContent = origKB >= 1024 ? `${(origKB / 1024).toFixed(2)} MB` : `${origKB.toFixed(1)} KB`;
+        if (newStats) newStats.textContent = '—';
+        if (dimStats) dimStats.textContent = `${w} × ${h} px (Original)`;
+        if (savingsStats) {
+            savingsStats.textContent = 'Not compressed';
+            savingsStats.style.color = 'var(--text-muted)';
+        }
+        const rawTarget = (document.getElementById('targetKB')?.value || '').trim();
+        const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
+        if (targetLabel) targetLabel.textContent = targetKB > 0 ? `${targetKB} KB` : 'None';
+        if (targetStatus) {
+            targetStatus.textContent = 'Ready to Compress';
+            targetStatus.style.background = 'rgba(31,209,249,0.12)';
+            targetStatus.style.color = 'var(--text-dark)';
+        }
+    } else {
+        if (origStats) origStats.textContent = '—';
+        if (newStats) newStats.textContent = '—';
+        if (dimStats) dimStats.textContent = '100% Preserved';
+        if (savingsStats) {
+            savingsStats.textContent = '0% smaller';
+            savingsStats.style.color = '#10b981';
+        }
+        if (targetLabel) targetLabel.textContent = 'None';
+        if (targetStatus) {
+            targetStatus.textContent = 'Standard Quality';
+            targetStatus.style.background = 'rgba(31,209,249,0.12)';
+            targetStatus.style.color = 'var(--text-dark)';
+        }
+    }
+}
+
 function setSizeMode(m, btn) {
     sizeMode = m;
     latestCompressReqId++;
     latestIncreaseReqId++;
     clearTimeout(liveTimer);
+    COMPRESSED_RESULT = null;
     document.querySelectorAll('#c-compress .sm-tab').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
     document.getElementById('compressMode').style.display = m === 'compress' ? '' : 'none';
     document.getElementById('increaseMode').style.display = m === 'increase' ? '' : 'none';
-    if (m === 'compress') liveCompress(80); else liveIncrease(80);
+    resetCompressStatsCard();
+    const livePreviewImg = document.getElementById('livePreviewImg');
+    if (livePreviewImg && IMG) {
+        livePreviewImg.src = RESULT || IMG.src;
+        livePreviewImg.style.filter = 'none';
+        livePreviewImg.style.transform = '';
+    }
+    const resInfo = document.getElementById('resInfo');
+    if (resInfo && IMG) {
+        resInfo.textContent = m === 'increase'
+            ? 'Adjust controls or click Execute File Size Boost'
+            : 'Adjust controls or click Compress Image';
+    }
 }
 
 // Resolution & Quality Detector
@@ -1098,6 +1506,12 @@ function updateCompressStatsCard(srcSnap, resultUrl, resObj) {
     }
 }
 
+function getCompressOutputFormat(selectId) {
+    const el = selectId ? document.getElementById(selectId) : null;
+    if (el && el.value) return el.value;
+    return 'image/jpeg';
+}
+
 function liveCompress(delayMs = 120) {
     const snap = getCompressSourceImage();
     if (!snap) return;
@@ -1108,7 +1522,7 @@ function liveCompress(delayMs = 120) {
     canvasLivePreview(async () => {
         if (reqId !== latestCompressReqId || sizeMode !== 'compress') return null;
 
-        const fmt = document.getElementById('compFmt').value;
+        const fmt = getCompressOutputFormat('compFmt');
         const rawTarget = (document.getElementById('targetKB').value || '').trim();
         const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
         const sliderQual = parseInt(document.getElementById('qualSlider').value, 10) / 100;
@@ -1147,7 +1561,7 @@ function liveIncrease(delayMs = 120) {
     canvasLivePreview(async () => {
         if (reqId !== latestIncreaseReqId || sizeMode !== 'increase') return null;
 
-        const fmt = document.getElementById('incFmt').value;
+        const fmt = getCompressOutputFormat('incFmt');
         const q = parseInt(document.getElementById('incQualSlider').value, 10) / 100;
         const rawTarget = (document.getElementById('targetIncKB')?.value || '').trim();
         const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
@@ -1194,7 +1608,7 @@ async function doCompress() {
     clearTimeout(liveTimer);
     const reqId = ++latestCompressReqId;
     showEditorProgress(true);
-    const fmt = document.getElementById('compFmt').value;
+    const fmt = getCompressOutputFormat('compFmt');
     const rawTarget = (document.getElementById('targetKB').value || '').trim();
     const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
     const sliderQual = parseInt(document.getElementById('qualSlider').value, 10) / 100;
@@ -1236,7 +1650,7 @@ async function doIncrease() {
     clearTimeout(liveTimer);
     const reqId = ++latestIncreaseReqId;
     showEditorProgress(true);
-    const fmt = document.getElementById('incFmt').value;
+    const fmt = getCompressOutputFormat('incFmt');
     const q = parseInt(document.getElementById('incQualSlider').value, 10) / 100;
     const rawTarget = (document.getElementById('targetIncKB').value || '').trim();
     const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
@@ -1784,14 +2198,171 @@ function cropRotate(deg) {
     setEditorResult(c.toDataURL('image/png'), `Rotated ${deg > 0 ? '+' : ''}${deg}°`);
 }
 
-// ═══ 7. BRIGHTNESS, CONTRAST, SATURATION, HUE ═══
+// ═══ 7. BRIGHTNESS, CONTRAST, SATURATION, HUE & PRO RGB COLOR BALANCE ═══
+let activeColorTone = 'midtones';
+let rgbBalance = {
+    shadows: { r: 0, g: 0, b: 0 },
+    midtones: { r: 0, g: 0, b: 0 },
+    highlights: { r: 0, g: 0, b: 0 },
+    preserveLuminosity: true
+};
+let rgbPreviewCache = { img: null, src: '', w: 0, h: 0, canvas: null };
+
+function formatSignedRgbVal(val) {
+    const n = parseInt(val, 10) || 0;
+    return n > 0 ? `+${n}` : `${n}`;
+}
+
+function hasActiveRgbBalance() {
+    const t = ['shadows', 'midtones', 'highlights'];
+    for (let i = 0; i < t.length; i++) {
+        const z = rgbBalance[t[i]];
+        if (z.r !== 0 || z.g !== 0 || z.b !== 0) return true;
+    }
+    return false;
+}
+
+function setColorBalanceTone(tone, btn) {
+    activeColorTone = (tone === 'shadows' || tone === 'highlights') ? tone : 'midtones';
+    document.querySelectorAll('#rgbToneTabs .sm-tab').forEach(b => b.classList.remove('active'));
+    if (btn) {
+        btn.classList.add('active');
+    } else {
+        const targetBtn = document.querySelector(`#rgbToneTabs .sm-tab[data-tone="${activeColorTone}"]`);
+        if (targetBtn) targetBtn.classList.add('active');
+    }
+
+    const current = rgbBalance[activeColorTone];
+    const rSlider = document.getElementById('rgbRSlider');
+    const gSlider = document.getElementById('rgbGSlider');
+    const bSlider = document.getElementById('rgbBSlider');
+    const rVal = document.getElementById('rgbRVal');
+    const gVal = document.getElementById('rgbGVal');
+    const bVal = document.getElementById('rgbBVal');
+
+    if (rSlider) rSlider.value = current.r;
+    if (gSlider) gSlider.value = current.g;
+    if (bSlider) bSlider.value = current.b;
+    if (rVal) rVal.textContent = formatSignedRgbVal(current.r);
+    if (gVal) gVal.textContent = formatSignedRgbVal(current.g);
+    if (bVal) bVal.textContent = formatSignedRgbVal(current.b);
+}
+
+function onRgbBalanceInput() {
+    const rSlider = document.getElementById('rgbRSlider');
+    const gSlider = document.getElementById('rgbGSlider');
+    const bSlider = document.getElementById('rgbBSlider');
+    const lumChk = document.getElementById('rgbPreserveLum');
+
+    const r = parseInt(rSlider?.value, 10) || 0;
+    const g = parseInt(gSlider?.value, 10) || 0;
+    const b = parseInt(bSlider?.value, 10) || 0;
+
+    rgbBalance[activeColorTone] = { r, g, b };
+    if (lumChk) rgbBalance.preserveLuminosity = !!lumChk.checked;
+
+    const rVal = document.getElementById('rgbRVal');
+    const gVal = document.getElementById('rgbGVal');
+    const bVal = document.getElementById('rgbBVal');
+    if (rVal) rVal.textContent = formatSignedRgbVal(r);
+    if (gVal) gVal.textContent = formatSignedRgbVal(g);
+    if (bVal) bVal.textContent = formatSignedRgbVal(b);
+
+    liveBrightness();
+}
+
+function applyColorBalanceToImageData(imageData, settings) {
+    const data = imageData.data;
+    const sh = settings.shadows;
+    const md = settings.midtones;
+    const hi = settings.highlights;
+    const preserveLum = !!settings.preserveLuminosity;
+    const scaleFactor = 0.0045;
+
+    for (let i = 0; i < data.length; i += 4) {
+        const origR = data[i] / 255;
+        const origG = data[i + 1] / 255;
+        const origB = data[i + 2] / 255;
+
+        const lum = 0.299 * origR + 0.587 * origG + 0.114 * origB;
+
+        // Smooth Photoshop-style tonal weights (Shadows, Midtones, Highlights)
+        const wShadows = lum < 0.65 ? (1 - lum / 0.65) : 0;
+        const wHighlights = lum > 0.35 ? ((lum - 0.35) / 0.65) : 0;
+        const wMidtones = 4 * lum * (1 - lum);
+
+        let r = origR + (sh.r * wShadows + md.r * wMidtones + hi.r * wHighlights) * scaleFactor;
+        let g = origG + (sh.g * wShadows + md.g * wMidtones + hi.g * wHighlights) * scaleFactor;
+        let b = origB + (sh.b * wShadows + md.b * wMidtones + hi.b * wHighlights) * scaleFactor;
+
+        if (preserveLum) {
+            const clampedR = r < 0 ? 0 : (r > 1 ? 1 : r);
+            const clampedG = g < 0 ? 0 : (g > 1 ? 1 : g);
+            const clampedB = b < 0 ? 0 : (b > 1 ? 1 : b);
+            const lNew = 0.299 * clampedR + 0.587 * clampedG + 0.114 * clampedB;
+            if (lNew > 0.0001) {
+                const ratio = lum / lNew;
+                r = clampedR * ratio;
+                g = clampedG * ratio;
+                b = clampedB * ratio;
+            }
+        }
+
+        data[i] = r <= 0 ? 0 : (r >= 1 ? 255 : Math.round(r * 255));
+        data[i + 1] = g <= 0 ? 0 : (g >= 1 ? 255 : Math.round(g * 255));
+        data[i + 2] = b <= 0 ? 0 : (b >= 1 ? 255 : Math.round(b * 255));
+    }
+    return imageData;
+}
+
+function getRgbPreviewCanvas(srcImg) {
+    const srcKey = srcImg.src || '';
+    if (rgbPreviewCache.img === srcImg && rgbPreviewCache.src === srcKey && rgbPreviewCache.canvas) {
+        return rgbPreviewCache.canvas;
+    }
+    const maxDim = 900;
+    const natW = srcImg.naturalWidth || srcImg.width || 1;
+    const natH = srcImg.naturalHeight || srcImg.height || 1;
+    const scale = Math.min(1, maxDim / Math.max(natW, natH));
+    const pw = Math.max(1, Math.round(natW * scale));
+    const ph = Math.max(1, Math.round(natH * scale));
+    const c = document.createElement('canvas');
+    c.width = pw;
+    c.height = ph;
+    rgbPreviewCache = { img: srcImg, src: srcKey, w: pw, h: ph, canvas: c };
+    return c;
+}
+
 function liveBrightness() {
     if (!IMG) return;
     const br = document.getElementById('brSlider').value;
     const ct = document.getElementById('ctSlider').value;
     const sat = document.getElementById('satSlider').value;
     const hue = document.getElementById('hueSlider').value;
-    cssLivePreview(`brightness(${br}%) contrast(${ct}%) saturate(${sat}%) hue-rotate(${hue}deg)`);
+    const filterStr = `brightness(${br}%) contrast(${ct}%) saturate(${sat}%) hue-rotate(${hue}deg)`;
+
+    if (!hasActiveRgbBalance()) {
+        const livePreviewImg = document.getElementById('livePreviewImg');
+        if (livePreviewImg && livePreviewImg.src !== IMG.src) {
+            livePreviewImg.src = IMG.src;
+        }
+        cssLivePreview(filterStr);
+        return;
+    }
+
+    const snap = IMG;
+    canvasLivePreview(() => {
+        const c = getRgbPreviewCanvas(snap);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.clearRect(0, 0, c.width, c.height);
+        ctx.filter = filterStr;
+        ctx.drawImage(snap, 0, 0, c.width, c.height);
+        ctx.filter = 'none';
+        const imgData = ctx.getImageData(0, 0, c.width, c.height);
+        applyColorBalanceToImageData(imgData, rgbBalance);
+        ctx.putImageData(imgData, 0, 0);
+        return c.toDataURL('image/jpeg', 0.9);
+    }, 35);
 }
 
 function resetBrightness() {
@@ -1813,22 +2384,48 @@ function resetBrightness() {
     if (satv) satv.textContent = '100';
     if (huev) huev.textContent = '0';
 
+    rgbBalance = {
+        shadows: { r: 0, g: 0, b: 0 },
+        midtones: { r: 0, g: 0, b: 0 },
+        highlights: { r: 0, g: 0, b: 0 },
+        preserveLuminosity: true
+    };
+    const lumChk = document.getElementById('rgbPreserveLum');
+    if (lumChk) lumChk.checked = true;
+    setColorBalanceTone('midtones');
+
     const livePreviewImg = document.getElementById('livePreviewImg');
-    if (livePreviewImg) livePreviewImg.style.filter = 'none';
+    if (livePreviewImg) {
+        livePreviewImg.style.filter = 'none';
+        if (IMG && livePreviewImg.src !== IMG.src) {
+            livePreviewImg.src = IMG.src;
+        }
+    }
 }
 
 function doBrightness() {
     if (!IMG) { showEditorStatus('⚠️ Upload or import an image first.', 'err'); return; }
+    clearTimeout(liveTimer);
     showEditorProgress(true);
     const br = document.getElementById('brSlider').value;
     const ct = document.getElementById('ctSlider').value;
     const sat = document.getElementById('satSlider').value;
     const hue = document.getElementById('hueSlider').value;
-    const c = getCanvas(IMG.width, IMG.height), ctx = c.getContext('2d');
+    const natW = IMG.naturalWidth || IMG.width;
+    const natH = IMG.naturalHeight || IMG.height;
+    const c = getCanvas(natW, natH);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.filter = `brightness(${br}%) contrast(${ct}%) saturate(${sat}%) hue-rotate(${hue}deg)`;
-    ctx.drawImage(IMG, 0, 0);
+    ctx.drawImage(IMG, 0, 0, natW, natH);
     ctx.filter = 'none';
-    setEditorResult(c.toDataURL('image/jpeg', 0.97), 'Adjustments applied');
+    if (hasActiveRgbBalance()) {
+        const imgData = ctx.getImageData(0, 0, natW, natH);
+        applyColorBalanceToImageData(imgData, rgbBalance);
+        ctx.putImageData(imgData, 0, 0);
+    }
+    const outUrl = c.toDataURL('image/jpeg', 0.97);
+    setEditorResult(outUrl, 'Color adjustments applied');
+    resetBrightness();
 }
 
 // ═══ 11. WATERMARK ═══
@@ -2876,7 +3473,9 @@ window.addEventListener('DOMContentLoaded', () => {
                         FNAME = f.name.replace(/\.[^.]+$/, '');
                         const img = new Image();
                         img.onload = () => {
+                            resetCompressBaseImage();
                             IMG = img;
+                            resetCompressStatsCard();
                             HISTORY = [];
                             HIST_IDX = -1;
                             const src = ev.target.result;
@@ -2941,4 +3540,7 @@ window.addEventListener('DOMContentLoaded', () => {
             }, { passive: false });
         }
     });
+
+    // Hydrate any cross-studio transfer queued across multi-page navigation
+    checkPendingCrossStudioTransfer();
 });

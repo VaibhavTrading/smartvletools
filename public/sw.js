@@ -3,7 +3,7 @@
  * Complete offline caching for Document Studio, ID Card Studio, Image & PDF Editor
  */
 
-const CACHE_NAME = 'monu-offline-v1.5';
+const CACHE_NAME = 'monu-offline-v1.9';
 
 const PRECACHE_URLS = [
   '/',
