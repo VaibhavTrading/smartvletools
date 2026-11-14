@@ -129,6 +129,8 @@
         const format = (outputFormat === 'image/webp' || outputFormat === 'image/png') ? outputFormat : 'image/jpeg';
         const isPng = (format === 'image/png');
         const defaultQuality = typeof options.quality === 'number' ? Math.min(0.95, Math.max(0.01, options.quality)) : 0.80;
+        const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
+        const dpi = parseInt(options.dpi, 10) || 0;
 
         // Step 1: Resolve input to an HTMLImageElement to obtain pristine original source & natural dimensions
         let imgElement = null;
@@ -235,21 +237,26 @@
             // Mode 1: Normal Compression Mode (No Target Size Specified)
             // Strictly preserves 100% original dimensions and uses slider quality (e.g., quality 80)
             if (targetBytes <= 0) {
+                if (shouldAbort && shouldAbort()) return { aborted: true };
                 const qualityInt = Math.round(defaultQuality * 100);
                 const initial = await renderCandidate(1.0, qualityInt);
-                const outUrl = URL.createObjectURL(initial.blob);
-                const dataUrl = await blobToDataUrl(initial.blob);
+                if (shouldAbort && shouldAbort()) return { aborted: true };
+                const finalBlob = (format === 'image/jpeg' && dpi > 0)
+                    ? await patchJpegDpiInPlace(initial.blob, dpi)
+                    : initial.blob;
+                const outUrl = URL.createObjectURL(finalBlob);
+                const dataUrl = await blobToDataUrl(finalBlob);
 
                 return {
-                    blob: initial.blob,
+                    blob: finalBlob,
                     url: outUrl,
                     dataUrl,
                     width: initial.width,
                     height: initial.height,
                     originalWidth: origW,
                     originalHeight: origH,
-                    actualBytes: initial.blob.size,
-                    actualKB: parseFloat((initial.blob.size / 1024).toFixed(1)),
+                    actualBytes: finalBlob.size,
+                    actualKB: parseFloat((finalBlob.size / 1024).toFixed(1)),
                     originalBytes,
                     originalKB,
                     targetKB: 0,
@@ -262,7 +269,7 @@
                     targetReached: true,
                     nearTarget: false,
                     status: 'standard',
-                    statusMessage: `Compressed to ${(initial.blob.size / 1024).toFixed(1)} KB (${initial.width}×${initial.height}px, Quality: ${initial.qualityInt})`,
+                    statusMessage: `Compressed to ${(finalBlob.size / 1024).toFixed(1)} KB (${initial.width}×${initial.height}px, Quality: ${initial.qualityInt})`,
                     revoke: () => URL.revokeObjectURL(outUrl)
                 };
             }
@@ -274,6 +281,7 @@
                 // PNG is lossless in browser canvas (quality integer is ignored).
                 // Test 100% original resolution first.
                 const fullPng = await renderCandidate(1.0, 100);
+                if (shouldAbort && shouldAbort()) return { aborted: true };
                 if (fullPng.blob.size <= targetBytes) {
                     chosenCandidate = fullPng;
                 } else {
@@ -283,8 +291,10 @@
                     let bestPng = null;
 
                     for (let iter = 0; iter < 12; iter++) {
+                        if (shouldAbort && shouldAbort()) return { aborted: true };
                         const midScale = parseFloat(((loScale + hiScale) / 2).toFixed(4));
                         const cand = await renderCandidate(midScale, 100);
+                        if (shouldAbort && shouldAbort()) return { aborted: true };
 
                         if (cand.blob.size <= targetBytes) {
                             bestPng = cand;
@@ -300,7 +310,9 @@
                     if (!bestPng) {
                         let emScale = 0.5;
                         while (emScale >= 0.002) {
+                            if (shouldAbort && shouldAbort()) return { aborted: true };
                             const cand = await renderCandidate(emScale, 100);
+                            if (shouldAbort && shouldAbort()) return { aborted: true };
                             if (cand.blob.size <= targetBytes) {
                                 bestPng = cand;
                                 break;
@@ -321,8 +333,10 @@
                 let bestStageACandidate = null;
 
                 while (lowQ <= highQ) {
+                    if (shouldAbort && shouldAbort()) return { aborted: true };
                     const midQ = Math.floor((lowQ + highQ) / 2);
                     const cand = await renderCandidate(1.0, midQ);
+                    if (shouldAbort && shouldAbort()) return { aborted: true };
 
                     if (cand.blob.size <= targetBytes) {
                         // Valid candidate! Target size satisfied.
@@ -350,8 +364,10 @@
                         let hQ = 95;
                         let bestAtScale = null;
                         while (lQ <= hQ) {
+                            if (shouldAbort && shouldAbort()) return null;
                             const midQ = Math.floor((lQ + hQ) / 2);
                             const cand = await renderCandidate(scale, midQ);
+                            if (shouldAbort && shouldAbort()) return null;
                             if (cand.blob.size <= targetBytes) {
                                 bestAtScale = cand;
                                 lQ = midQ + 1; // Try higher quality at this scale
@@ -370,8 +386,10 @@
                     let hiScale = 0.98;
 
                     for (let iter = 0; iter < 10; iter++) {
+                        if (shouldAbort && shouldAbort()) return { aborted: true };
                         const midScale = parseFloat(((loScale + hiScale) / 2).toFixed(4));
                         const candAtScale = await findBestQualityAtScale(midScale);
+                        if (shouldAbort && shouldAbort()) return { aborted: true };
 
                         if (candAtScale !== null) {
                             validScaleCandidates.push(candAtScale);
@@ -402,7 +420,9 @@
                     if (!chosenCandidate || chosenCandidate.blob.size > targetBytes) {
                         let emScale = 0.5;
                         while (emScale >= 0.002) {
+                            if (shouldAbort && shouldAbort()) return { aborted: true };
                             const emCand = await findBestQualityAtScale(emScale);
+                            if (shouldAbort && shouldAbort()) return { aborted: true };
                             if (emCand && emCand.blob.size <= targetBytes) {
                                 chosenCandidate = emCand;
                                 break;
@@ -412,6 +432,8 @@
                     }
                 }
             }
+
+            if (shouldAbort && shouldAbort()) return { aborted: true };
 
             // GUARANTEE CHECK:
             // Ensure chosenCandidate exists and strictly satisfies actualBytes <= targetBytes
@@ -425,13 +447,18 @@
                 }
             }
 
+            if (shouldAbort && shouldAbort()) return { aborted: true };
+
             const chosen = chosenCandidate;
-            const actualBytes = chosen.blob.size;
+            const finalBlob = (format === 'image/jpeg' && dpi > 0)
+                ? await patchJpegDpiInPlace(chosen.blob, dpi)
+                : chosen.blob;
+            const actualBytes = finalBlob.size;
             const actualKB = parseFloat((actualBytes / 1024).toFixed(1));
             const isReached = actualBytes <= targetBytes;
 
-            const finalObjectUrl = URL.createObjectURL(chosen.blob);
-            const dataUrl = await blobToDataUrl(chosen.blob);
+            const finalObjectUrl = URL.createObjectURL(finalBlob);
+            const dataUrl = await blobToDataUrl(finalBlob);
 
             const scaleFormatted = chosen.scale < 0.999 ? ` (${Math.round(chosen.scale * 100)}% scale)` : '';
             const statusMessage = isReached
@@ -439,7 +466,7 @@
                 : `TARGET NOT REACHED: ${actualKB} KB (${chosen.width}×${chosen.height}px${scaleFormatted}, Quality: ${chosen.qualityInt})`;
 
             return {
-                blob: chosen.blob,
+                blob: finalBlob,
                 url: finalObjectUrl,
                 dataUrl,
                 width: chosen.width,
@@ -461,6 +488,331 @@
                 nearTarget: !isReached,
                 status: isReached ? 'reached' : 'not_reached',
                 statusMessage,
+                revoke: () => URL.revokeObjectURL(finalObjectUrl)
+            };
+        } finally {
+            if (tempObjectUrl) {
+                URL.revokeObjectURL(tempObjectUrl);
+            }
+        }
+    }
+
+    // Standard CRC-32 table for PNG chunk padding
+    const _crcTable = (() => {
+        const table = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) {
+                c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+            }
+            table[n] = c >>> 0;
+        }
+        return table;
+    })();
+
+    function crc32Bytes(bytes) {
+        let crc = 0xffffffff;
+        for (let i = 0; i < bytes.length; i++) {
+            crc = _crcTable[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    // Patches standard JFIF APP0 DPI bytes in-place (changes 0 bytes of file size)
+    async function patchJpegDpiInPlace(blob, dpi) {
+        if (!blob || !dpi || dpi < 1 || dpi > 65535) return blob;
+        try {
+            const buf = await blob.arrayBuffer();
+            const u8 = new Uint8Array(buf);
+            if (u8.length >= 18 &&
+                u8[0] === 0xFF && u8[1] === 0xD8 &&
+                u8[2] === 0xFF && u8[3] === 0xE0 &&
+                u8[6] === 0x4A && u8[7] === 0x46 && u8[8] === 0x49 && u8[9] === 0x46 && u8[10] === 0x00) {
+                u8[13] = 1; // pixels per inch
+                u8[14] = (dpi >> 8) & 0xFF;
+                u8[15] = dpi & 0xFF;
+                u8[16] = (dpi >> 8) & 0xFF;
+                u8[17] = dpi & 0xFF;
+                return new Blob([u8], { type: 'image/jpeg' });
+            }
+        } catch (e) {
+            // ignore metadata patch failures
+        }
+        return blob;
+    }
+
+    // Spec-compliant binary metadata chunk padding so Increase Target KB ALWAYS succeeds reliably
+    async function padImageBlobToTargetBytes(blob, targetBytes, format) {
+        if (!blob || !targetBytes || blob.size >= targetBytes) return blob;
+        const src = new Uint8Array(await blob.arrayBuffer());
+        const deficit = targetBytes - src.length;
+        if (deficit <= 0) return blob;
+
+        if (format === 'image/jpeg' && src.length >= 4 && src[0] === 0xFF && src[1] === 0xD8) {
+            // Insert valid JPEG COM (0xFF 0xFE) segments directly after SOI (0xFF 0xD8).
+            // Max COM segment total size is 65537 bytes? Wait: 2-byte length field includes itself (max 65535),
+            // so total segment bytes = 2 (marker FF FE) + 65535 = 65537 bytes (payload = 65533 bytes).
+            let addedChunks = [];
+            let rem = deficit;
+            while (rem > 0) {
+                let segTotal;
+                if (rem <= 65537) {
+                    segTotal = Math.max(4, rem);
+                } else {
+                    // Leave at least 4 bytes for the final segment
+                    segTotal = Math.min(65537, rem - 4);
+                }
+                const lenField = segTotal - 2;
+                const chunk = new Uint8Array(segTotal);
+                chunk[0] = 0xFF;
+                chunk[1] = 0xFE;
+                chunk[2] = (lenField >> 8) & 0xFF;
+                chunk[3] = lenField & 0xFF;
+                chunk.fill(0x20, 4); // ASCII spaces
+                addedChunks.push(chunk);
+                rem -= segTotal;
+            }
+            const totalAdded = addedChunks.reduce((acc, c) => acc + c.length, 0);
+            const out = new Uint8Array(src.length + totalAdded);
+            out.set(src.subarray(0, 2), 0);
+            let offset = 2;
+            for (const c of addedChunks) {
+                out.set(c, offset);
+                offset += c.length;
+            }
+            out.set(src.subarray(2), offset);
+            return new Blob([out], { type: 'image/jpeg' });
+        }
+
+        if (format === 'image/png' && src.length >= 20 &&
+            src[src.length - 8] === 0x49 && src[src.length - 7] === 0x45 &&
+            src[src.length - 6] === 0x4E && src[src.length - 5] === 0x44) {
+            // Insert valid PNG tEXt chunk with exact CRC-32 right before the 12-byte IEND chunk.
+            // Overhead per chunk = 12 bytes (4 len + 4 'tEXt' + 4 CRC). Prefix 'p\0' = 2 bytes. Min added = 14 bytes.
+            const insertAt = src.length - 12;
+            const totalAdd = Math.max(14, deficit);
+            const payloadLen = totalAdd - 12; // includes 'p\0' + spaces
+            const chunk = new Uint8Array(totalAdd);
+            const dv = new DataView(chunk.buffer);
+            dv.setUint32(0, payloadLen, false);
+            chunk[4] = 0x74; // 't'
+            chunk[5] = 0x45; // 'E'
+            chunk[6] = 0x58; // 'X'
+            chunk[7] = 0x74; // 't'
+            chunk[8] = 0x70; // 'p'
+            chunk[9] = 0x00; // null separator
+            chunk.fill(0x20, 10, 8 + payloadLen);
+            const crc = crc32Bytes(chunk.subarray(4, 8 + payloadLen));
+            dv.setUint32(8 + payloadLen, crc, false);
+
+            const out = new Uint8Array(src.length + totalAdd);
+            out.set(src.subarray(0, insertAt), 0);
+            out.set(chunk, insertAt);
+            out.set(src.subarray(insertAt), insertAt + totalAdd);
+            return new Blob([out], { type: 'image/png' });
+        }
+
+        if (format === 'image/webp' && src.length >= 16 &&
+            src[0] === 0x52 && src[1] === 0x49 && src[2] === 0x46 && src[3] === 0x46 &&
+            src[8] === 0x57 && src[9] === 0x45 && src[10] === 0x42 && src[11] === 0x50) {
+            // Append valid RIFF JUNK chunk (even payload length) and update RIFF size header
+            const needEvenSrcPad = (src.length % 2 === 1) ? 1 : 0;
+            let payloadLen = Math.max(0, deficit - needEvenSrcPad - 8);
+            if (payloadLen % 2 === 1) payloadLen += 1;
+            const addedLen = needEvenSrcPad + 8 + payloadLen;
+            const out = new Uint8Array(src.length + addedLen);
+            out.set(src, 0);
+            let pos = src.length + needEvenSrcPad;
+            out[pos] = 0x4A; // 'J'
+            out[pos + 1] = 0x55; // 'U'
+            out[pos + 2] = 0x4E; // 'N'
+            out[pos + 3] = 0x4B; // 'K'
+            const dv = new DataView(out.buffer);
+            dv.setUint32(pos + 4, payloadLen, true);
+            dv.setUint32(4, out.length - 8, true);
+            return new Blob([out], { type: 'image/webp' });
+        }
+
+        return blob;
+    }
+
+    async function increaseImageToTargetSize(file, targetSizeKB, outputFormat = 'image/jpeg', options = {}) {
+        if (!file) {
+            throw new Error('increaseImageToTargetSize: A valid image input is required.');
+        }
+        const targetKB = parseFloat(targetSizeKB) || 0;
+        const targetBytes = targetKB > 0 ? Math.round(targetKB * 1024) : 0;
+        const format = (outputFormat === 'image/webp' || outputFormat === 'image/png') ? outputFormat : 'image/jpeg';
+        const isPng = (format === 'image/png');
+        const qualityFloor = typeof options.quality === 'number' ? Math.min(1.0, Math.max(0.70, options.quality)) : 0.95;
+        const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
+        const dpi = parseInt(options.dpi, 10) || 0;
+
+        let imgElement = null;
+        let tempObjectUrl = null;
+        if (typeof file === 'string') {
+            imgElement = new Image();
+            imgElement.crossOrigin = 'anonymous';
+            await new Promise((resolve, reject) => {
+                imgElement.onload = () => resolve();
+                imgElement.onerror = () => reject(new Error('Failed to load image.'));
+                imgElement.src = file;
+            });
+        } else if (file instanceof HTMLImageElement) {
+            imgElement = file;
+        } else if (file instanceof Blob || file instanceof File) {
+            tempObjectUrl = URL.createObjectURL(file);
+            imgElement = new Image();
+            await new Promise((resolve, reject) => {
+                imgElement.onload = () => resolve();
+                imgElement.onerror = () => reject(new Error('Failed to decode image.'));
+                imgElement.src = tempObjectUrl;
+            });
+        } else {
+            throw new Error('increaseImageToTargetSize: Unsupported image input.');
+        }
+
+        const origW = imgElement.naturalWidth || imgElement.width || 1;
+        const origH = imgElement.naturalHeight || imgElement.height || 1;
+
+        const renderAt = async (scale, qualityFloat) => {
+            const targetW = Math.max(1, Math.round(origW * scale));
+            const targetH = Math.max(1, Math.round(origH * scale));
+            const canvas = acquireCanvas(targetW, targetH);
+            const ctx = canvas.getContext('2d', { alpha: isPng });
+            if (!isPng) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, targetW, targetH);
+            } else {
+                ctx.clearRect(0, 0, targetW, targetH);
+            }
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(imgElement, 0, 0, targetW, targetH);
+            const blob = await canvasToBlobAsync(canvas, format, isPng ? undefined : Math.min(1.0, Math.max(0.01, qualityFloat)));
+            releaseCanvas(canvas);
+            return { blob, width: targetW, height: targetH, scale, quality: qualityFloat };
+        };
+
+        try {
+            if (shouldAbort && shouldAbort()) return { aborted: true };
+
+            // Mode A: No target KB specified -> encode cleanly at requested quality floor & original resolution
+            if (targetBytes <= 0) {
+                const cand = await renderAt(1.0, qualityFloor);
+                if (shouldAbort && shouldAbort()) return { aborted: true };
+                const finalBlob = (format === 'image/jpeg' && dpi > 0)
+                    ? await patchJpegDpiInPlace(cand.blob, dpi)
+                    : cand.blob;
+                const url = URL.createObjectURL(finalBlob);
+                const dataUrl = await blobToDataUrl(finalBlob);
+                const actualKB = parseFloat((finalBlob.size / 1024).toFixed(1));
+                return {
+                    blob: finalBlob,
+                    url,
+                    dataUrl,
+                    width: cand.width,
+                    height: cand.height,
+                    originalWidth: origW,
+                    originalHeight: origH,
+                    actualBytes: finalBlob.size,
+                    actualKB,
+                    targetKB: 0,
+                    quality: cand.quality,
+                    format,
+                    targetReached: true,
+                    status: 'standard',
+                    statusMessage: `Quality set to ${Math.round(cand.quality * 100)}% (~${actualKB} KB)`,
+                    revoke: () => URL.revokeObjectURL(url)
+                };
+            }
+
+            // Mode B: Target Minimum File Size (KB)
+            // Step 1: Test 100% original resolution at maximum quality (1.0)
+            let chosen = await renderAt(1.0, 1.0);
+            if (shouldAbort && shouldAbort()) return { aborted: true };
+
+            if (chosen.blob.size >= targetBytes) {
+                // Can reach or exceed targetBytes at 100% resolution: find lowest quality >= qualityFloor that satisfies >= targetBytes
+                if (!isPng) {
+                    const floorCand = await renderAt(1.0, qualityFloor);
+                    if (shouldAbort && shouldAbort()) return { aborted: true };
+                    if (floorCand.blob.size >= targetBytes) {
+                        chosen = floorCand;
+                    } else {
+                        let lo = qualityFloor;
+                        let hi = 1.0;
+                        let best = chosen;
+                        for (let i = 0; i < 8; i++) {
+                            if (shouldAbort && shouldAbort()) return { aborted: true };
+                            const mid = (lo + hi) / 2;
+                            const c = await renderAt(1.0, mid);
+                            if (c.blob.size >= targetBytes) {
+                                best = c;
+                                hi = mid - 0.005;
+                            } else {
+                                lo = mid + 0.005;
+                            }
+                            if (hi - lo < 0.005) break;
+                        }
+                        chosen = best;
+                    }
+                }
+            } else {
+                // Step 2: Controlled upscaling up to max 2400px longest side to naturally add pixel detail
+                const maxDim = Math.max(origW, origH);
+                const maxSafeScale = maxDim < 2400 ? Math.min(2.5, 2400 / maxDim) : 1.0;
+                if (maxSafeScale > 1.05) {
+                    const stepScales = [1.25, 1.5, 1.85, maxSafeScale].filter(s => s <= maxSafeScale + 0.01);
+                    for (const s of stepScales) {
+                        if (shouldAbort && shouldAbort()) return { aborted: true };
+                        const c = await renderAt(s, 1.0);
+                        chosen = c;
+                        if (c.blob.size >= targetBytes) {
+                            break;
+                        }
+                    }
+                }
+
+                // Step 3: If even high-res quality=1.0 is below targetBytes (very common for clean docs/logos boosted to 500-2000 KB),
+                // pad validly inside standard container metadata chunk so exact targetBytes is ALWAYS reached!
+                if (chosen.blob.size < targetBytes) {
+                    const paddedBlob = await padImageBlobToTargetBytes(chosen.blob, targetBytes, format);
+                    chosen = { ...chosen, blob: paddedBlob };
+                }
+            }
+
+            if (shouldAbort && shouldAbort()) return { aborted: true };
+
+            const finalBlob = (format === 'image/jpeg' && dpi > 0)
+                ? await patchJpegDpiInPlace(chosen.blob, dpi)
+                : chosen.blob;
+            const actualBytes = finalBlob.size;
+            const actualKB = parseFloat((actualBytes / 1024).toFixed(1));
+            const targetReached = actualBytes >= targetBytes;
+
+            const finalObjectUrl = URL.createObjectURL(finalBlob);
+            const dataUrl = await blobToDataUrl(finalBlob);
+
+            return {
+                blob: finalBlob,
+                url: finalObjectUrl,
+                dataUrl,
+                width: chosen.width,
+                height: chosen.height,
+                originalWidth: origW,
+                originalHeight: origH,
+                actualBytes,
+                actualKB,
+                targetKB,
+                quality: chosen.quality,
+                scaleUsed: chosen.scale,
+                format,
+                targetReached,
+                status: targetReached ? 'reached' : 'not_reached',
+                statusMessage: targetReached
+                    ? `🎯 Target Reached! Enlarged to ${actualKB} KB (${chosen.width}×${chosen.height}px)`
+                    : `Enlarged to ${actualKB} KB (${chosen.width}×${chosen.height}px)`,
                 revoke: () => URL.revokeObjectURL(finalObjectUrl)
             };
         } finally {
@@ -605,10 +957,26 @@
 
             const res = await standardCompressImage(sourceImg, targetKB, format, {
                 quality,
-                originalBytes: options.originalBytes
+                originalBytes: options.originalBytes,
+                shouldAbort: options.shouldAbort,
+                dpi: options.dpi
             });
 
             return res;
+        },
+
+        async increaseImage(sourceImg, options = {}) {
+            if (!sourceImg) throw new Error('No source image provided to SmartOptimizationEngine.');
+
+            const format = options.format || 'image/jpeg';
+            const targetKB = parseFloat(options.targetKB) || 0;
+            const quality = options.quality !== undefined ? parseFloat(options.quality) : 0.95;
+
+            return await increaseImageToTargetSize(sourceImg, targetKB, format, {
+                quality,
+                shouldAbort: options.shouldAbort,
+                dpi: options.dpi
+            });
         },
 
         /**
@@ -953,10 +1321,12 @@
 
     SmartOptimizationEngine.compressImageToTargetSize = standardCompressImage;
     SmartOptimizationEngine.standardCompressImage = standardCompressImage;
+    SmartOptimizationEngine.increaseImageToTargetSize = increaseImageToTargetSize;
 
     // Expose globally
     global.compressImageToTargetSize = standardCompressImage;
     global.standardCompressImage = standardCompressImage;
+    global.increaseImageToTargetSize = increaseImageToTargetSize;
     global.SmartOptimizationEngine = SmartOptimizationEngine;
 
 })(typeof window !== 'undefined' ? window : this);

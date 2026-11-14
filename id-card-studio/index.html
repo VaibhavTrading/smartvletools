@@ -827,12 +827,12 @@
                                 </div>
                                 <div class="control-group">
                                     <div class="control-label"><span>Target Maximum File Size (KB)</span></div>
-                                    <input type="number" id="targetKB" placeholder="e.g. 50, 100, 200 (optional)" min="1" oninput="liveCompress()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
+                                    <input type="number" id="targetKB" placeholder="e.g. 50, 100, 200 (optional)" min="1" oninput="liveCompress(550)" onchange="liveCompress(0)" onkeydown="if(event.key==='Enter'){event.preventDefault();doCompress();}" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
                                     <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">Leave blank to use quality slider, or enter a target file size.</div>
                                 </div>
                                 <div class="control-group">
                                     <div class="control-label"><span>Resolution / DPI</span><span id="compDpiVal">300 DPI</span></div>
-                                    <input type="number" id="compDpi" value="300" min="1" max="1200" placeholder="e.g. 300" oninput="document.getElementById('compDpiVal').textContent = (this.value || 300) + ' DPI'; liveCompress()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
+                                    <input type="number" id="compDpi" value="300" min="1" max="1200" placeholder="e.g. 300" oninput="document.getElementById('compDpiVal').textContent = (this.value || 300) + ' DPI'; liveCompress(350)" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
                                     <div style="font-size:10px; color:var(--text-muted); margin-top:2px;">DPI print metadata (target size automatically optimizes resolution as needed).</div>
                                 </div>
                                 <button class="btn btn-main" onclick="doCompress()" style="width:100%; margin-top:8px;">Compress Image</button>
@@ -866,7 +866,7 @@
                             <div id="increaseMode" style="display:none;">
                                 <div class="control-group">
                                     <div class="control-label"><span>Target Minimum File Size (KB)</span></div>
-                                    <input type="number" id="targetIncKB" placeholder="e.g. 500, 1000, 2000" min="1" oninput="liveIncrease()" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
+                                    <input type="number" id="targetIncKB" placeholder="e.g. 500, 1000, 2000" min="1" oninput="liveIncrease(550)" onchange="liveIncrease(0)" onkeydown="if(event.key==='Enter'){event.preventDefault();doIncrease();}" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border-light);">
                                 </div>
                                 <div class="control-group">
                                     <div class="control-label"><span>Output Format</span></div>
@@ -1334,9 +1334,9 @@
 
 <!-- Core Engine Scripts -->
 <script src="/browser-image-compression.js"></script>
-<script src="/smart-optimizer.js"></script>
+<script src="/smart-optimizer.js?v=20261114d"></script>
 <script src="/script.js"></script>
-<script src="/editor.js"></script>
+<script src="/editor.js?v=20261114d"></script>
 <script src="/site-router.js?v=20261114c"></script>
 <script src="/pwa-controller.js"></script>
 </body>

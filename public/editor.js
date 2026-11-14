@@ -584,7 +584,8 @@ function switchTool(id, btn) {
         updateImageInfoBar(IMG, RESULT || IMG.src, FNAME, IMG_FILE);
         updateEditorFilenameUI(false);
         if (id === 'compress') {
-            liveCompress();
+            if (sizeMode === 'increase') liveIncrease();
+            else liveCompress();
         }
         if (id === 'crop') initCropDisplay();
         if (id === 'brightness') resetBrightness();
@@ -893,6 +894,8 @@ function resetToolPreview() {
 // ═══ 1. COMPRESS / INCREASE ═══
 let sizeMode = 'compress';
 let compressBaseImg = null; // Pristine source locked for re-compression
+let latestCompressReqId = 0;
+let latestIncreaseReqId = 0;
 
 function getCompressSourceImage() {
     if (compressBaseImg && compressBaseImg.width > 0) {
@@ -912,11 +915,14 @@ function resetCompressBaseImage() {
 
 function setSizeMode(m, btn) {
     sizeMode = m;
+    latestCompressReqId++;
+    latestIncreaseReqId++;
+    clearTimeout(liveTimer);
     document.querySelectorAll('#c-compress .sm-tab').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
     document.getElementById('compressMode').style.display = m === 'compress' ? '' : 'none';
     document.getElementById('increaseMode').style.display = m === 'increase' ? '' : 'none';
-    if (m === 'compress') liveCompress(); else liveIncrease();
+    if (m === 'compress') liveCompress(80); else liveIncrease(80);
 }
 
 // Resolution & Quality Detector
@@ -940,18 +946,25 @@ function onCompressPresetChange() {
 }
 window.onCompressPresetChange = onCompressPresetChange;
 
-async function processImageCompress(srcSnap, format, sliderQuality, targetKB) {
+async function processImageCompress(srcSnap, format, sliderQuality, targetKB, reqId = 0, dpi = 300) {
     if (window.SmartOptimizationEngine && window.SmartOptimizationEngine.optimizeImage) {
         const result = await window.SmartOptimizationEngine.optimizeImage(srcSnap, {
             format,
             targetKB,
             quality: sliderQuality,
+            dpi,
+            shouldAbort: reqId ? () => reqId !== latestCompressReqId : undefined,
             originalBytes: (IMG_FILE && IMG_FILE.size) ? IMG_FILE.size : 0
         });
+
+        if (!result || result.aborted || (reqId && reqId !== latestCompressReqId)) {
+            return { aborted: true };
+        }
 
         COMPRESSED_RESULT = result;
 
         return {
+            rawResult: result,
             url: result.dataUrl || result.url,
             blob: result.blob,
             actualKB: parseFloat(result.actualKB.toFixed(1)),
@@ -1085,16 +1098,26 @@ function updateCompressStatsCard(srcSnap, resultUrl, resObj) {
     }
 }
 
-function liveCompress() {
+function liveCompress(delayMs = 120) {
     const snap = getCompressSourceImage();
     if (!snap) return;
 
-    canvasLivePreview(async () => {
-        const fmt = document.getElementById('compFmt').value;
-        const targetKB = parseFloat(document.getElementById('targetKB').value) || 0;
-        const sliderQual = parseInt(document.getElementById('qualSlider').value, 10) / 100;
+    const reqId = ++latestCompressReqId;
+    const wait = (typeof delayMs === 'number' && delayMs >= 0) ? delayMs : 120;
 
-        const res = await processImageCompress(snap, fmt, sliderQual, targetKB);
+    canvasLivePreview(async () => {
+        if (reqId !== latestCompressReqId || sizeMode !== 'compress') return null;
+
+        const fmt = document.getElementById('compFmt').value;
+        const rawTarget = (document.getElementById('targetKB').value || '').trim();
+        const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
+        const sliderQual = parseInt(document.getElementById('qualSlider').value, 10) / 100;
+        const compDpi = parseInt(document.getElementById('compDpi')?.value, 10) || 300;
+
+        const res = await processImageCompress(snap, fmt, sliderQual, targetKB, reqId, compDpi);
+        if (!res || res.aborted || reqId !== latestCompressReqId || sizeMode !== 'compress') {
+            return null;
+        }
         const url = res.url;
 
         updateCompressStatsCard(snap, url, res);
@@ -1111,41 +1134,81 @@ function liveCompress() {
             resInfo.textContent = `Preview: ~${estKB}KB (${res.width}×${res.height}px, Quality: ${qDisp})${statusNote}`;
         }
         return url;
-    }, 120);
+    }, wait);
 }
 
-function liveIncrease() {
-    if (!IMG) return;
-    const snap = IMG;
-    canvasLivePreview(() => {
+function liveIncrease(delayMs = 120) {
+    const snap = getCompressSourceImage();
+    if (!snap) return;
+
+    const reqId = ++latestIncreaseReqId;
+    const wait = (typeof delayMs === 'number' && delayMs >= 0) ? delayMs : 120;
+
+    canvasLivePreview(async () => {
+        if (reqId !== latestIncreaseReqId || sizeMode !== 'increase') return null;
+
         const fmt = document.getElementById('incFmt').value;
         const q = parseInt(document.getElementById('incQualSlider').value, 10) / 100;
+        const rawTarget = (document.getElementById('targetIncKB')?.value || '').trim();
+        const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
+        const compDpi = parseInt(document.getElementById('compDpi')?.value, 10) || 300;
+
+        if (window.SmartOptimizationEngine && window.SmartOptimizationEngine.increaseImage) {
+            const res = await window.SmartOptimizationEngine.increaseImage(snap, {
+                format: fmt,
+                targetKB,
+                quality: q,
+                dpi: compDpi,
+                shouldAbort: () => reqId !== latestIncreaseReqId
+            });
+            if (!res || res.aborted || reqId !== latestIncreaseReqId || sizeMode !== 'increase') {
+                return null;
+            }
+            COMPRESSED_RESULT = res;
+            const resInfo = document.getElementById('resInfo');
+            if (resInfo) {
+                const statusTag = (targetKB > 0 && res.targetReached) ? ' [🎯 TARGET REACHED]' : '';
+                resInfo.textContent = `Preview: ~${res.actualKB}KB (${res.width}×${res.height}px)${statusTag}`;
+            }
+            return res.dataUrl || res.url;
+        }
+
         const c = getCanvas(snap.width, snap.height);
         const ctx = c.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, snap.width, snap.height);
+        if (fmt !== 'image/png') {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, snap.width, snap.height);
+        }
         ctx.drawImage(snap, 0, 0);
         const url = c.toDataURL(fmt, q);
         const resInfo = document.getElementById('resInfo');
         if (resInfo) resInfo.textContent = `Preview: ~${((url.split(',')[1].length * 3 / 4) / 1024).toFixed(1)}KB`;
         return url;
-    }, 120);
+    }, wait);
 }
 
 async function doCompress() {
     const snap = getCompressSourceImage();
     if (!snap) { showEditorStatus('⚠️ Upload or import an image first.', 'err'); return; }
 
+    clearTimeout(liveTimer);
+    const reqId = ++latestCompressReqId;
     showEditorProgress(true);
     const fmt = document.getElementById('compFmt').value;
-    const targetKB = parseFloat(document.getElementById('targetKB').value) || 0;
+    const rawTarget = (document.getElementById('targetKB').value || '').trim();
+    const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
     const sliderQual = parseInt(document.getElementById('qualSlider').value, 10) / 100;
     const compDpi = parseInt(document.getElementById('compDpi').value, 10) || 300;
 
     const dpiValEl = document.getElementById('compDpiVal');
     if (dpiValEl) dpiValEl.textContent = `${compDpi} DPI`;
 
-    const res = await processImageCompress(snap, fmt, sliderQual, targetKB);
+    const res = await processImageCompress(snap, fmt, sliderQual, targetKB, reqId, compDpi);
+    if (!res || res.aborted || reqId !== latestCompressReqId) {
+        finishEditorProgress();
+        return;
+    }
+
     const finalKB = res.actualKB || (res.url.startsWith('data:') ? ((res.url.split(',')[1].length * 3 / 4) / 1024).toFixed(1) : '—');
 
     updateCompressStatsCard(snap, res.url, res);
@@ -1161,55 +1224,57 @@ async function doCompress() {
     }
 
     setEditorResult(res.url, statusMsg, true);
+    // Preserve pristine source image & exact Blob result for subsequent adjustments & download
+    compressBaseImg = snap;
+    COMPRESSED_RESULT = res.rawResult || res;
 }
 
-function doIncrease() {
-    if (!IMG) { showEditorStatus('⚠️ Upload or import an image first.', 'err'); return; }
+async function doIncrease() {
+    const snap = getCompressSourceImage();
+    if (!snap) { showEditorStatus('⚠️ Upload or import an image first.', 'err'); return; }
+
+    clearTimeout(liveTimer);
+    const reqId = ++latestIncreaseReqId;
     showEditorProgress(true);
     const fmt = document.getElementById('incFmt').value;
     const q = parseInt(document.getElementById('incQualSlider').value, 10) / 100;
-    const targetKB = parseFloat(document.getElementById('targetIncKB').value);
+    const rawTarget = (document.getElementById('targetIncKB').value || '').trim();
+    const targetKB = rawTarget !== '' ? (parseFloat(rawTarget) || 0) : 0;
+    const compDpi = parseInt(document.getElementById('compDpi')?.value, 10) || 300;
 
-    if (targetKB > 0) {
-        const c = getCanvas(IMG.width, IMG.height);
-        c.getContext('2d').drawImage(IMG, 0, 0);
-        const maxUrl = c.toDataURL(fmt, 1.0);
-        const maxKB = (maxUrl.split(',')[1].length * 3 / 4) / 1024;
-
-        if (maxKB >= targetKB) {
-            let lo = 0, hi = 100, best = null;
-            for (let i = 0; i < 16; i++) {
-                const mid = Math.round((lo + hi) / 2);
-                const c2 = getCanvas(IMG.width, IMG.height);
-                c2.getContext('2d').drawImage(IMG, 0, 0);
-                const d = c2.toDataURL(fmt, mid / 100);
-                const kb = (d.split(',')[1].length * 3 / 4) / 1024;
-                if (kb >= targetKB) { best = d; hi = mid - 1; }
-                else lo = mid + 1;
-                if (lo > hi) break;
+    if (window.SmartOptimizationEngine && window.SmartOptimizationEngine.increaseImage) {
+        try {
+            const res = await window.SmartOptimizationEngine.increaseImage(snap, {
+                format: fmt,
+                targetKB,
+                quality: q,
+                dpi: compDpi,
+                shouldAbort: () => reqId !== latestIncreaseReqId
+            });
+            if (!res || res.aborted || reqId !== latestIncreaseReqId) {
+                finishEditorProgress();
+                return;
             }
-            setEditorResult(best || maxUrl, `Enlarged size to ~${(best ? (best.split(',')[1].length * 3 / 4) / 1024 : maxKB).toFixed(0)}KB`);
-        } else {
-            let scale = 1;
-            let result = maxUrl;
-            while ((result.split(',')[1].length * 3 / 4) / 1024 < targetKB && scale < 8) {
-                scale += 0.25;
-                const nw = Math.round(IMG.width * scale), nh = Math.round(IMG.height * scale);
-                const c2 = getCanvas(nw, nh);
-                const ctx = c2.getContext('2d');
-                ctx.imageSmoothingEnabled = true;
-                ctx.imageSmoothingQuality = 'high';
-                ctx.drawImage(IMG, 0, 0, nw, nh);
-                result = c2.toDataURL(fmt, 1.0);
-            }
-            const kb = (result.split(',')[1].length * 3 / 4) / 1024;
-            setEditorResult(result, `Enlarged size to ~${kb.toFixed(0)}KB`);
+            const outUrl = res.dataUrl || res.url;
+            setEditorResult(outUrl, res.statusMessage, true);
+            compressBaseImg = snap;
+            COMPRESSED_RESULT = res;
+            return;
+        } catch (err) {
+            console.warn('Increase image engine error:', err);
         }
-    } else {
-        const c = getCanvas(IMG.width, IMG.height);
-        c.getContext('2d').drawImage(IMG, 0, 0);
-        setEditorResult(c.toDataURL(fmt, q), `Quality set to ${Math.round(q * 100)}%`);
     }
+
+    const c = getCanvas(snap.width, snap.height);
+    const ctx = c.getContext('2d');
+    if (fmt !== 'image/png') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, snap.width, snap.height);
+    }
+    ctx.drawImage(snap, 0, 0);
+    const url = c.toDataURL(fmt, q);
+    setEditorResult(url, `Quality set to ${Math.round(q * 100)}%`, true);
+    compressBaseImg = snap;
 }
 
 // ═══ 2. RESIZE (WITH UNIT CONVERSION) ═══
